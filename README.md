@@ -1,11 +1,11 @@
 # EVM Bytecode Decompiler
 
-AI-assisted semantic decompiler for EVM bytecode, powered by Gigahorse.
+AI-assisted semantic decompiler for EVM runtime bytecode, powered by a pinned
+Gigahorse toolchain.
 
-The implementation provides deterministic input normalization, a pinned
-Gigahorse adapter, canonical IR, selector/storage inference, optional
-structured AI semantics/synthesis, validation, caching, and benchmark tooling.
-Output is reconstructed from bytecode and is **not verified source code**.
+The pipeline keeps deterministic bytecode facts separate from inferred names
+and semantics. Every generated Solidity-like file is **reconstructed,
+unverified pseudocode**, not recovered source code.
 
 ## Quick start
 
@@ -15,28 +15,134 @@ uv run evm-bytecode-decompiler version
 uv run evm-bytecode-decompiler decompile tests/fixtures/erc20/runtime.hex --no-ai
 ```
 
-Use `--rpc-url` and `--block` for an address. A block number is always passed
-through explicitly to `eth_getCode`.
+The command prints the run directory. A typical run contains:
 
-Set `OPENAI_API_KEY` and `OPENAI_MODEL` to enable the optional OpenAI-compatible
-semantic passes. `--no-ai` always stays deterministic, and provider failures
-fall back to deterministic pseudocode.
+```text
+run/
+├── input/             # exact runtime and analysis bytecode
+├── gigahorse/         # invocation, results, and normalized facts
+├── ir/                # versioned canonical evidence IR
+├── semantics/         # optional AI annotations and synthesis
+├── output/            # pseudocode, ABI, storage, evidence map, report
+├── logs/
+└── run.json
+```
 
-Saved runs can be inspected or regenerated with `explain`, `render`, and
-`validate`. Run the 20-source benchmark with `benchmark run`; use a compiler
-matching each fixture's pragma.
+## Inputs
 
-Gigahorse is optional for the deterministic checkpoint: when no executable is
-configured, the built-in bytecode lifter produces a limited, clearly labeled
-fallback workspace. Configure a pinned Gigahorse Docker image or local binary
-for full relation extraction.
+Raw bytecode and `.hex` files are accepted directly:
 
-The reproducible Docker build requires both an immutable `BASE_IMAGE` digest
-and a full Gigahorse commit; see `docker/gigahorse.Dockerfile`.
+```bash
+uv run evm-bytecode-decompiler decompile 0x6000 --no-ai
+uv run evm-bytecode-decompiler decompile ./contract.hex --no-ai
+```
 
-## Project status
+An address requires an RPC endpoint. Historical analysis passes the requested
+block tag to `eth_getCode` and never silently substitutes `latest`. The CLI
+accepts the address as `TARGET`:
 
-The plan's Phase 13 fixture set is included. Full Gigahorse execution requires
-the pinned submodule's Soufflé and native functors to be built, or a digest-
-pinned Docker image to be configured. In environments without those tools,
-the CLI reports and uses its limited deterministic fallback explicitly.
+```bash
+uv run evm-bytecode-decompiler decompile \
+  0x1234567890123456789012345678901234567890 \
+  --chain ethereum --rpc-url "$ETH_RPC_URL" --block 20123456 --no-ai
+```
+
+## AI semantics
+
+AI is optional. Configure the OpenAI-compatible provider with environment
+variables or `evm-bytecode-decompiler.toml`:
+
+```bash
+export OPENAI_API_KEY=...
+export OPENAI_MODEL=...
+uv run evm-bytecode-decompiler decompile ./contract.hex
+```
+
+Use `--no-ai` for deterministic-only output. The AI path uses versioned
+structured prompts, bounded concurrency, evidence validation, one repair pass,
+and a separate review pass. Provider failures fall back to deterministic
+pseudocode; they do not mutate canonical IR. AI cache entries are keyed by
+canonical input, prompt version, model, and schema version.
+
+## Gigahorse
+
+The repository pins Gigahorse at:
+
+```text
+9e9c08d78079638342ca54101b347f1d6781b425
+```
+
+Initialize the toolchain and its pinned recursive dependency with:
+
+```bash
+git submodule update --init --recursive
+uv run evm-bytecode-decompiler doctor
+```
+
+Local Gigahorse execution additionally needs Soufflé and the compiled native
+functors under `vendor/gigahorse-toolchain/souffle-addon/`. Without those
+dependencies, the CLI reports the pinned revision and uses the limited,
+explicitly labeled builtin lifter.
+
+For a reproducible container, build `docker/gigahorse.Dockerfile` with an
+immutable `BASE_IMAGE` digest and the full Gigahorse commit:
+
+```bash
+docker build \
+  --build-arg BASE_IMAGE=<image@sha256:digest> \
+  --build-arg GIGAHORSE_COMMIT=9e9c08d78079638342ca54101b347f1d6781b425 \
+  -f docker/gigahorse.Dockerfile .
+```
+
+The Docker runner rejects mutable image tags and disables network access for
+the analysis container.
+
+## Inspecting a run
+
+```bash
+uv run evm-bytecode-decompiler explain RUN_DIR --selector 0xa9059cbb
+uv run evm-bytecode-decompiler render RUN_DIR --annotated
+uv run evm-bytecode-decompiler validate RUN_DIR
+uv run evm-bytecode-decompiler decompile ./contract.hex --resume --no-ai
+```
+
+Useful environment checks:
+
+```bash
+uv run evm-bytecode-decompiler doctor
+uv run evm-bytecode-decompiler cache stats
+uv run evm-bytecode-decompiler cache clear
+```
+
+## Benchmark
+
+`benchmarks/manifest.json` contains 20 source fixtures covering storage,
+tokens, access control, mappings, arrays, structs, errors, events, loops,
+internal functions, proxies, CREATE2, assembly, and multiple Solidity eras.
+The benchmark compiles source first and passes only runtime bytecode to the
+decompiler:
+
+```bash
+uv run evm-bytecode-decompiler benchmark run \
+  --solc /path/to/version-managed-solc \
+  --output-dir runs/benchmark
+uv run evm-bytecode-decompiler benchmark report --output-dir runs/benchmark
+```
+
+Use a compiler matching each fixture pragma; `--strict` fails on compilation
+errors or deterministic fixture regressions.
+
+## Development
+
+```bash
+uv sync
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+uv build
+```
+
+The project intentionally does not claim exact source recovery, exploit
+generation, transaction tracing, symbolic execution of every path, storage
+value fetching, vulnerability classification, or a web service.
