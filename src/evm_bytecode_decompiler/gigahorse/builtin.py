@@ -45,18 +45,84 @@ def _reachable(entry: str, by_id: dict[str, BytecodeBlock]) -> set[str]:
     return seen
 
 
-def _stack_expressions(block: BytecodeBlock) -> dict[int, str]:
-    """Keep only nearby PUSH facts; full stack recovery belongs to Gigahorse."""
-    pushes: list[Instruction] = []
+def _expr_text(value: tuple[str, object]) -> str:
+    kind, item = value
+    if kind == "constant":
+        return str(item)
+    if kind == "caller":
+        return "msg.sender"
+    if kind == "calldata":
+        return f"calldata({item})"
+    return str(item)
+
+
+def _storage_expressions(block: BytecodeBlock) -> dict[int, str]:
+    """Recover only stack/memory shapes with unambiguous local evidence."""
+    stack: list[tuple[str, object]] = []
+    memory: dict[int, tuple[str, object]] = {}
     result: dict[int, str] = {}
+
+    def pop() -> tuple[str, object]:
+        return stack.pop() if stack else ("unknown", "unknown")
+
+    def constant(value: tuple[str, object]) -> int | None:
+        return int(value[1]) if value[0] == "constant" and isinstance(value[1], int) else None
+
     for instruction in block.instructions:
-        if instruction.operand is not None and instruction.opcode >= 0x60:
-            pushes.append(instruction)
-        elif instruction.opcode in {0x54, 0x55}:
-            slot = pushes[-1].operand if pushes else None
-            result[instruction.pc] = f"fixed:{slot}" if slot is not None else "symbolic:sload"
+        if instruction.opcode == 0x5F:
+            stack.append(("constant", 0))
+        elif instruction.operand is not None and instruction.opcode >= 0x60:
+            stack.append(("constant", instruction.operand))
+        elif instruction.opcode == 0x33:
+            stack.append(("caller", "msg.sender"))
+        elif instruction.opcode == 0x35:
+            stack.append(("calldata", _expr_text(pop())))
+        elif instruction.opcode == 0x52:
+            offset = constant(pop())
+            value = pop()
+            if offset is not None:
+                memory[offset] = value
         elif instruction.opcode == 0x20:
-            result[instruction.pc] = "mapping:unknown"
+            offset = constant(pop())
+            size = constant(pop())
+            words = (
+                [memory.get(offset + index * 32) for index in range(2)]
+                if offset is not None
+                else []
+            )
+            if size == 64 and len(words) == 2 and all(words):
+                key = words[0]
+                base = words[1]
+                assert key is not None and base is not None
+                base_slot = constant(base)
+                if base_slot is not None:
+                    if key[0] == "mapping":
+                        nested = f"nested:{base_slot}:{key[1]}:{_expr_text(key)}"
+                        stack.append(("mapping", nested))
+                    else:
+                        stack.append(("mapping", f"mapping:{base_slot}:{_expr_text(key)}"))
+                else:
+                    stack.append(("unknown", "sha3"))
+            else:
+                stack.append(("unknown", "sha3"))
+        elif instruction.opcode == 0x54:
+            slot = pop()
+            if slot[0] == "constant":
+                result[instruction.pc] = f"fixed:{slot[1]}"
+            elif slot[0] == "mapping":
+                result[instruction.pc] = str(slot[1])
+            else:
+                result[instruction.pc] = "symbolic:sload"
+            stack.append(("sload", f"sload@{instruction.pc:04x}"))
+        elif instruction.opcode == 0x55:
+            slot = pop()
+            pop()  # value; the relation records the nearest deterministic variable separately.
+            if slot[0] == "constant":
+                result[instruction.pc] = f"fixed:{slot[1]}"
+            elif slot[0] == "mapping":
+                result[instruction.pc] = str(slot[1])
+            else:
+                result[instruction.pc] = "symbolic:sstore"
     return result
 
 
@@ -87,11 +153,12 @@ def build_builtin_relations(code: bytes) -> RelationSet:
         "StorageStore": [],
         "Call": [],
         "Event": [],
+        "EventTopic": [],
         "Revert": [],
     }
     for block in blocks:
         previous_variable: str | None = None
-        stack_facts = _stack_expressions(block)
+        stack_facts = _storage_expressions(block)
         for instruction in block.instructions:
             statement = f"S_{instruction.pc:04x}"
             variable = f"v_{instruction.pc:04x}"
@@ -115,33 +182,42 @@ def build_builtin_relations(code: bytes) -> RelationSet:
                 value = previous_variable or "unknown"
                 slot = stack_facts.get(instruction.pc, "symbolic:sstore")
                 relations["StorageStore"].append((statement, slot, value))
-            elif instruction.opcode in {0xf0, 0xf1, 0xf2, 0xf4, 0xf5, 0xfa, 0xff}:
+            elif instruction.opcode in {0xF0, 0xF1, 0xF2, 0xF4, 0xF5, 0xFA, 0xFF}:
                 call_type = {
-                    0xf0: "create",
-                    0xf1: "call",
-                    0xf2: "callcode",
-                    0xf4: "delegatecall",
-                    0xf5: "create2",
-                    0xfa: "staticcall",
-                    0xff: "selfdestruct",
+                    0xF0: "create",
+                    0xF1: "call",
+                    0xF2: "callcode",
+                    0xF4: "delegatecall",
+                    0xF5: "create2",
+                    0xFA: "staticcall",
+                    0xFF: "selfdestruct",
                 }[instruction.opcode]
                 relations["Call"].append(
                     (statement, call_type, "unknown", "unknown", "unknown", "unknown", variable)
                 )
-            elif 0xa0 <= instruction.opcode <= 0xa4:
+            elif 0xA0 <= instruction.opcode <= 0xA4:
+                event_id = f"E_{instruction.pc:04x}"
+                topic_count = instruction.opcode - 0xA0
                 relations["Event"].append(
                     (
-                        f"E_{instruction.pc:04x}",
+                        event_id,
                         statement,
-                        str(instruction.opcode - 0xa0),
+                        str(topic_count),
                         "unknown",
                     )
                 )
-            elif instruction.opcode in {0xfd, 0xfe}:
-                kind = "revert" if instruction.opcode == 0xfd else "invalid"
-                relations["Revert"].append(
-                    (f"R_{instruction.pc:04x}", statement, kind)
-                )
+                pushes = [
+                    item.operand
+                    for item in block.instructions[: block.instructions.index(instruction)]
+                    if item.operand is not None
+                ]
+                for topic_index, topic_value in enumerate(
+                    pushes[-topic_count:] if topic_count else []
+                ):
+                    relations["EventTopic"].append((event_id, str(topic_index), str(topic_value)))
+            elif instruction.opcode in {0xFD, 0xFE}:
+                kind = "revert" if instruction.opcode == 0xFD else "invalid"
+                relations["Revert"].append((f"R_{instruction.pc:04x}", statement, kind))
     function_entries: list[tuple[str, ...]] = [
         (function, block_id(destination)) for _, function, destination in selectors
     ]

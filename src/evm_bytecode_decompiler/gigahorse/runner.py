@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Sequence
@@ -44,11 +45,28 @@ class LocalGigahorseRunner:
         client: Path | None = None,
         timeout_seconds: int = 180,
         commit: str = "",
+        toolchain_dir: Path | None = None,
     ) -> None:
         self.executable = executable
         self.client = client.resolve() if client else None
         self.timeout_seconds = timeout_seconds
         self.commit = commit or "unknown"
+        self.toolchain_dir = toolchain_dir.resolve() if toolchain_dir else None
+
+    def _commit(self) -> str:
+        if self.commit != "unknown" or self.toolchain_dir is None:
+            return self.commit
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.toolchain_dir), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return "unknown"
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
 
     def run(self, code: bytes, output_dir: Path, *, sha256: str) -> GigahorseResult:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -59,14 +77,35 @@ class LocalGigahorseRunner:
             input_path.write_text(code.hex() + "\n", encoding="ascii")
             relations_dir = work / "relations"
             relations_dir.mkdir()
-            argv = [self.executable, str(input_path), "--output", str(relations_dir)]
-            if self.client:
-                argv.extend(["--client", str(self.client)])
-            _write_invocation(output_dir / "invocation.json", argv, cwd=work)
+            executable_path = Path(self.executable)
+            is_script = executable_path.name == "gigahorse.py"
+            if is_script:
+                gh_work = work / "gigahorse-work"
+                results_path = work / "gigahorse-results.json"
+                argv = [
+                    sys.executable,
+                    str(executable_path.resolve()),
+                    "-w",
+                    str(gh_work),
+                    "-r",
+                    str(results_path),
+                    "-T",
+                    str(self.timeout_seconds),
+                ]
+                if self.client:
+                    argv.extend(["-C", str(self.client)])
+                argv.append(str(input_path))
+                command_cwd = self.toolchain_dir or executable_path.resolve().parent
+            else:
+                argv = [self.executable, str(input_path), "--output", str(relations_dir)]
+                if self.client:
+                    argv.extend(["--client", str(self.client)])
+                command_cwd = work
+            _write_invocation(output_dir / "invocation.json", argv, cwd=command_cwd)
             try:
                 completed = subprocess.run(
                     argv,
-                    cwd=work,
+                    cwd=command_cwd,
                     capture_output=True,
                     text=True,
                     timeout=self.timeout_seconds,
@@ -76,7 +115,7 @@ class LocalGigahorseRunner:
                 return GigahorseResult(
                     "timeout",
                     "unknown",
-                    self.commit,
+                    self._commit(),
                     output_dir / "facts",
                     errors=[f"Gigahorse timed out after {self.timeout_seconds}s"],
                     duration_ms=int((time.monotonic() - started) * 1000),
@@ -87,28 +126,31 @@ class LocalGigahorseRunner:
                 return GigahorseResult(
                     "error",
                     "unknown",
-                    self.commit,
+                    self._commit(),
                     output_dir / "facts",
                     errors=[f"could not execute Gigahorse: {exc}"],
                     duration_ms=int((time.monotonic() - started) * 1000),
                 )
             facts_dir = output_dir / "facts"
             facts_dir.mkdir(exist_ok=True)
-            for path in relations_dir.rglob("*"):
+            source_dir = relations_dir
+            if is_script:
+                source_dir = work / "gigahorse-work" / sha256 / "out"
+            for path in source_dir.rglob("*"):
                 if path.is_file() and path.suffix in {".csv", ".tsv", ".facts"}:
                     shutil.copy2(path, facts_dir / path.name)
+            if is_script and (work / "gigahorse-results.json").is_file():
+                shutil.copy2(work / "gigahorse-results.json", output_dir / "raw-results.json")
             (output_dir / "stdout.log").write_text(completed.stdout, encoding="utf-8")
             (output_dir / "stderr.log").write_text(completed.stderr, encoding="utf-8")
             status: Literal["ok", "error"] = "ok" if completed.returncode == 0 else "error"
             errors = (
-                []
-                if status == "ok"
-                else [f"Gigahorse exited with status {completed.returncode}"]
+                [] if status == "ok" else [f"Gigahorse exited with status {completed.returncode}"]
             )
             return GigahorseResult(
                 status,
                 "unknown",
-                self.commit,
+                self._commit(),
                 facts_dir,
                 warnings=[completed.stderr] if completed.stderr and status == "ok" else [],
                 errors=errors,

@@ -24,6 +24,7 @@ RELATION_COLUMNS: dict[str, int] = {
     "StorageStore": 3,
     "Call": 7,
     "Event": 4,
+    "EventTopic": 3,
     "Revert": 3,
     "Constant": 2,
 }
@@ -43,11 +44,15 @@ def parse_relation_file(path: Path) -> list[tuple[str, ...]]:
 
 
 def load_relations(directory: Path) -> RelationSet:
-    relations: RelationSet = {}
+    raw: RelationSet = {}
     for path in sorted(directory.iterdir()):
         if path.suffix not in {".csv", ".tsv", ".facts"} or not path.is_file():
             continue
-        relations[path.stem] = parse_relation_file(path)
+        raw[path.stem] = parse_relation_file(path)
+    relations = dict(raw)
+    for name, rows in raw.items():
+        if name.startswith("EBD_"):
+            relations[name[4:]] = rows
     return relations
 
 

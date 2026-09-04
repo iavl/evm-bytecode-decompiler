@@ -71,8 +71,17 @@ def normalize_target(
     block: int | str | None = None,
     timeout: float = 15.0,
 ) -> NormalizedBytecode:
-    path = Path(target)
-    if path.is_file():
+    candidate = target.strip()
+    hex_text = candidate[2:] if candidate.startswith(("0x", "0X")) else candidate
+    looks_like_hex = (
+        bool(hex_text)
+        and len(hex_text) % 2 == 0
+        and all(character in "0123456789abcdefABCDEF" for character in hex_text)
+    )
+    path = (
+        Path(target) if not looks_like_hex and len(target) < 4096 and "\x00" not in target else None
+    )
+    if path is not None and path.is_file():
         return normalize_bytecode(
             path.read_text(encoding="utf-8"),
             kind=InputKind.FILE,

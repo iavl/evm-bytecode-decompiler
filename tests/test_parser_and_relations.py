@@ -33,3 +33,10 @@ def test_builtin_relations_cover_fixture_facts(tmp_path: Path) -> None:
     assert {name: sorted(rows) for name, rows in loaded.items()} == {
         name: sorted(rows) for name, rows in relations.items()
     }
+
+
+def test_builtin_lifter_recovers_a_fixed_mapping_shape() -> None:
+    mapping_access = bytes.fromhex("602a6000526003602052604060002054")
+    relations = build_builtin_relations(mapping_access)
+
+    assert relations["StorageLoad"][0][1] == "mapping:3:42"

@@ -9,7 +9,11 @@ ARG GIGAHORSE_REPOSITORY=https://github.com/eth-sri/gigahorse-toolchain.git
 ARG GIGAHORSE_COMMIT
 
 RUN case "$BASE_IMAGE" in *@sha256:*) ;; *) echo "BASE_IMAGE must use a digest" >&2; exit 1 ;; esac
-RUN test -n "$GIGAHORSE_COMMIT"
+RUN test -n "$GIGAHORSE_COMMIT" \
+    && case "$GIGAHORSE_COMMIT" in \
+        [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;; \
+        *) echo "GIGAHORSE_COMMIT must be a full commit SHA" >&2; exit 1 ;; \
+    esac
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates git \
     && rm -rf /var/lib/apt/lists/*

@@ -24,6 +24,7 @@ Rows are sorted before they are persisted, making the adapter output stable.
 | `StorageStore` | statement, slot expression, value | Storage write. |
 | `Call` | statement, call type, target, value, input, output, result | Low-level call/create fact. |
 | `Event` | event, statement, topic count, data | LOG fact. |
+| `EventTopic` | event, topic index, value | Deterministic/constant LOG topic when available. |
 | `Revert` | revert, statement, kind | REVERT or INVALID fact. |
 | `Constant` | statement, value | Exact numeric literal. |
 

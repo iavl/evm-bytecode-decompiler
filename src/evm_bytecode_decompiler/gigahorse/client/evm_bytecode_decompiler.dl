@@ -1,50 +1,142 @@
 // EVM Bytecode Decompiler's narrow Gigahorse adapter boundary.
 //
-// The exact import path is supplied by the pinned Gigahorse toolchain.  Only
-// these normalized relations are consumed by Python; internal Gigahorse facts
-// must not leak into the canonical IR.
-.include "clientlib/decompiler_imports.dl"
+// Gigahorse already defines generic names such as FunctionEntry and SLOAD in
+// clientlib/decompiler_imports.dl. The EBD_ prefix avoids redeclarations while
+// the output filenames remain the stable Python-facing relation names.
+#include "clientlib/decompiler_imports.dl"
 
-.decl PublicFunction(selector:symbol, function:symbol)
-.decl FunctionEntry(function:symbol, block:symbol)
-.decl FunctionBlock(function:symbol, block:symbol)
-.decl Block(block:symbol)
-.decl BlockSuccessor(fromBlock:symbol, toBlock:symbol)
-.decl ConditionalSuccessor(fromBlock:symbol, trueBlock:symbol, falseBlock:symbol)
-.decl Statement(statement:symbol)
-.decl StatementBlock(statement:symbol, block:symbol)
-.decl StatementPC(statement:symbol, pc:number)
-.decl StatementOpcode(statement:symbol, opcode:symbol)
-.decl StatementOperand(statement:symbol, operand:number)
-.decl Defines(statement:symbol, variable:symbol)
-.decl Uses(statement:symbol, variable:symbol)
-.decl DataFlow(sourceVariable:symbol, destVariable:symbol)
-.decl StorageLoad(statement:symbol, slotExpr:symbol, resultVariable:symbol)
-.decl StorageStore(statement:symbol, slotExpr:symbol, valueVariable:symbol)
-.decl Call(statement:symbol, callType:symbol, target:symbol, value:symbol, input:symbol, output:symbol, resultVariable:symbol)
-.decl Event(event:symbol, statement:symbol, topicCount:number, data:symbol)
-.decl Revert(revert:symbol, statement:symbol, kind:symbol)
-.decl Constant(statement:symbol, value:number)
+.decl EBD_PublicFunction(selector:symbol, function:symbol)
+EBD_PublicFunction(selector, function) :- PublicFunctionSelector(function, selector).
+.output EBD_PublicFunction(IO="file", filename="EBD_PublicFunction.csv", delimiter="\t")
 
-// The checked-in declarations are the contract.  The rules binding them to
-// Gigahorse internals are intentionally kept minimal and toolchain-specific.
-.output PublicFunction
-.output FunctionEntry
-.output FunctionBlock
-.output Block
-.output BlockSuccessor
-.output ConditionalSuccessor
-.output Statement
-.output StatementBlock
-.output StatementPC
-.output StatementOpcode
-.output StatementOperand
-.output Defines
-.output Uses
-.output DataFlow
-.output StorageLoad
-.output StorageStore
-.output Call
-.output Event
-.output Revert
-.output Constant
+.decl EBD_FunctionEntry(function:symbol, block:symbol)
+EBD_FunctionEntry(function, block) :-
+  PublicFunctionSelector(function, _),
+  InFunction(block, function),
+  FunctionEntry(block).
+.output EBD_FunctionEntry(IO="file", filename="EBD_FunctionEntry.csv", delimiter="\t")
+
+.decl EBD_FunctionBlock(function:symbol, block:symbol)
+EBD_FunctionBlock(function, block) :- InFunction(block, function).
+.output EBD_FunctionBlock(IO="file", filename="EBD_FunctionBlock.csv", delimiter="\t")
+
+.decl EBD_Block(block:symbol)
+EBD_Block(block) :- IsBlock(block).
+.output EBD_Block(IO="file", filename="EBD_Block.csv", delimiter="\t")
+
+.decl EBD_BlockPC(block:symbol, pc:number)
+EBD_BlockPC(block, @hex_to_number(block)) :- EBD_Block(block).
+.output EBD_BlockPC(IO="file", filename="EBD_BlockPC.csv", delimiter="\t")
+
+.decl EBD_BlockSuccessor(fromBlock:symbol, toBlock:symbol)
+EBD_BlockSuccessor(fromBlock, toBlock) :- LocalBlockEdge(fromBlock, toBlock).
+.output EBD_BlockSuccessor(IO="file", filename="EBD_BlockSuccessor.csv", delimiter="\t")
+
+.decl EBD_ConditionalSuccessor(fromBlock:symbol, trueBlock:symbol, falseBlock:symbol)
+EBD_ConditionalSuccessor(fromBlock, trueBlock, falseBlock) :-
+  Block_Tail(fromBlock, tail),
+  Statement_Opcode(tail, "JUMPI"),
+  LocalBlockEdge(fromBlock, trueBlock),
+  LocalBlockEdge(fromBlock, falseBlock),
+  trueBlock != falseBlock.
+.output EBD_ConditionalSuccessor(IO="file", filename="EBD_ConditionalSuccessor.csv", delimiter="\t")
+
+.decl EBD_Statement(statement:symbol)
+EBD_Statement(statement) :- IsStatement(statement).
+.output EBD_Statement(IO="file", filename="EBD_Statement.csv", delimiter="\t")
+
+.decl EBD_StatementBlock(statement:symbol, block:symbol)
+EBD_StatementBlock(statement, block) :- Statement_Block(statement, block).
+.output EBD_StatementBlock(IO="file", filename="EBD_StatementBlock.csv", delimiter="\t")
+
+.decl EBD_StatementPC(statement:symbol, pc:number)
+EBD_StatementPC(statement, @hex_to_number(statement)) :- EBD_Statement(statement).
+.output EBD_StatementPC(IO="file", filename="EBD_StatementPC.csv", delimiter="\t")
+
+.decl EBD_StatementOpcode(statement:symbol, opcode:symbol)
+EBD_StatementOpcode(statement, opcode) :- Statement_Opcode(statement, opcode).
+.output EBD_StatementOpcode(IO="file", filename="EBD_StatementOpcode.csv", delimiter="\t")
+
+.decl EBD_StatementOperand(statement:symbol, operand:number)
+EBD_StatementOperand(statement, @hex_to_number(value)) :-
+  Statement_Opcode(statement, opcode),
+  Statement_Defines(statement, variable, _),
+  Variable_Value(variable, value),
+  STARTSWITH(opcode, "PUSH").
+.output EBD_StatementOperand(IO="file", filename="EBD_StatementOperand.csv", delimiter="\t")
+
+.decl EBD_Defines(statement:symbol, variable:symbol)
+EBD_Defines(statement, variable) :- Statement_Defines(statement, variable, _).
+.output EBD_Defines(IO="file", filename="EBD_Defines.csv", delimiter="\t")
+
+.decl EBD_Uses(statement:symbol, variable:symbol)
+EBD_Uses(statement, variable) :- Statement_Uses(statement, variable, _).
+.output EBD_Uses(IO="file", filename="EBD_Uses.csv", delimiter="\t")
+
+.decl EBD_DataFlow(sourceVariable:symbol, destVariable:symbol)
+EBD_DataFlow(sourceVariable, destVariable) :-
+  Statement_Defines(sourceStatement, sourceVariable, _),
+  Statement_Uses(destStatement, sourceVariable, _),
+  Statement_Defines(destStatement, destVariable, _).
+.output EBD_DataFlow(IO="file", filename="EBD_DataFlow.csv", delimiter="\t")
+
+.decl EBD_StorageLoad(statement:symbol, slotExpr:symbol, resultVariable:symbol)
+EBD_StorageLoad(statement, value, resultVariable) :-
+  SLOAD(statement, index, resultVariable),
+  Variable_Value(index, value).
+EBD_StorageLoad(statement, "symbolic", resultVariable) :-
+  SLOAD(statement, index, resultVariable),
+  !Variable_Value(index, _).
+.output EBD_StorageLoad(IO="file", filename="EBD_StorageLoad.csv", delimiter="\t")
+
+.decl EBD_StorageStore(statement:symbol, slotExpr:symbol, valueVariable:symbol)
+EBD_StorageStore(statement, value, valueVariable) :-
+  SSTORE(statement, index, valueVariable),
+  Variable_Value(index, value).
+EBD_StorageStore(statement, "symbolic", valueVariable) :-
+  SSTORE(statement, index, valueVariable),
+  !Variable_Value(index, _).
+.output EBD_StorageStore(IO="file", filename="EBD_StorageStore.csv", delimiter="\t")
+
+.decl EBD_Call(statement:symbol, callType:symbol, target:symbol, value:symbol, input:symbol, output:symbol, resultVariable:symbol)
+EBD_Call(statement, "call", target, value, input, output, success) :-
+  CALL(statement, _, target, value, input, _, output, _, success).
+EBD_Call(statement, "staticcall", target, "unknown", input, output, success) :-
+  STATICCALL(statement, _, target, input, _, output, _, success).
+EBD_Call(statement, "delegatecall", target, "unknown", input, output, success) :-
+  DELEGATECALL(statement, _, target, input, _, output, _, success).
+EBD_Call(statement, "callcode", target, value, input, output, success) :-
+  CALLCODE(statement, _, target, value, input, _, output, _, success).
+EBD_Call(statement, "create", "unknown", value, input, "unknown", address) :-
+  CREATE(statement, value, input, _, address).
+EBD_Call(statement, "create2", "unknown", value, input, "unknown", address) :-
+  CREATE2(statement, value, input, _, _, address).
+EBD_Call(statement, "selfdestruct", "unknown", "unknown", "unknown", "unknown", "unknown") :-
+  SELFDESTRUCT(statement, _).
+.output EBD_Call(IO="file", filename="EBD_Call.csv", delimiter="\t")
+
+.decl EBD_Event(event:symbol, statement:symbol, topicCount:number, data:symbol)
+EBD_Event(statement, statement, topicCount, "unknown") :-
+  LOGStatement(statement, topicCount).
+.output EBD_Event(IO="file", filename="EBD_Event.csv", delimiter="\t")
+
+.decl EBD_EventTopic(event:symbol, topicIndex:number, value:symbol)
+EBD_EventTopic(statement, index, value) :-
+  LOGIndexedArg(statement, variable, index),
+  Variable_Value(variable, value).
+.output EBD_EventTopic(IO="file", filename="EBD_EventTopic.csv", delimiter="\t")
+
+.decl EBD_Revert(revert:symbol, statement:symbol, kind:symbol)
+EBD_Revert(revert, statement, "revert") :-
+  REVERT(statement, _, _),
+  revert = cat("R_", statement).
+EBD_Revert(revert, statement, "invalid") :-
+  Statement_Opcode(statement, "INVALID"),
+  revert = cat("R_", statement).
+.output EBD_Revert(IO="file", filename="EBD_Revert.csv", delimiter="\t")
+
+.decl EBD_Constant(statement:symbol, value:number)
+EBD_Constant(statement, @hex_to_number(value)) :-
+  Statement_Defines(statement, variable, _),
+  Variable_Value(variable, value).
+.output EBD_Constant(IO="file", filename="EBD_Constant.csv", delimiter="\t")

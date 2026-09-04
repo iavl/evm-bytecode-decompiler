@@ -22,8 +22,8 @@ OPCODES = {
     0x36: "CALLDATASIZE",
     0x37: "CALLDATACOPY",
     0x39: "CODECOPY",
-    0x3d: "RETURNDATASIZE",
-    0x3e: "RETURNDATACOPY",
+    0x3D: "RETURNDATASIZE",
+    0x3E: "RETURNDATACOPY",
     0x50: "POP",
     0x51: "MLOAD",
     0x52: "MSTORE",
@@ -32,25 +32,25 @@ OPCODES = {
     0x55: "SSTORE",
     0x56: "JUMP",
     0x57: "JUMPI",
-    0x5b: "JUMPDEST",
-    0x5f: "PUSH0",
+    0x5B: "JUMPDEST",
+    0x5F: "PUSH0",
     0x80: "DUP1",
     0x90: "SWAP1",
-    0xa0: "LOG0",
-    0xa1: "LOG1",
-    0xa2: "LOG2",
-    0xa3: "LOG3",
-    0xa4: "LOG4",
-    0xf0: "CREATE",
-    0xf1: "CALL",
-    0xf2: "CALLCODE",
-    0xf3: "RETURN",
-    0xf4: "DELEGATECALL",
-    0xf5: "CREATE2",
-    0xfa: "STATICCALL",
-    0xfd: "REVERT",
-    0xfe: "INVALID",
-    0xff: "SELFDESTRUCT",
+    0xA0: "LOG0",
+    0xA1: "LOG1",
+    0xA2: "LOG2",
+    0xA3: "LOG3",
+    0xA4: "LOG4",
+    0xF0: "CREATE",
+    0xF1: "CALL",
+    0xF2: "CALLCODE",
+    0xF3: "RETURN",
+    0xF4: "DELEGATECALL",
+    0xF5: "CREATE2",
+    0xFA: "STATICCALL",
+    0xFD: "REVERT",
+    0xFE: "INVALID",
+    0xFF: "SELFDESTRUCT",
 }
 
 
@@ -101,9 +101,9 @@ def build_blocks(instructions: list[Instruction]) -> list[BytecodeBlock]:
         return []
     starts = {instructions[0].pc}
     pc_to_index = {instruction.pc: index for index, instruction in enumerate(instructions)}
-    terminators = {0x00, 0x56, 0x57, 0xf3, 0xfd, 0xfe, 0xff}
+    terminators = {0x00, 0x56, 0x57, 0xF3, 0xFD, 0xFE, 0xFF}
     for index, instruction in enumerate(instructions):
-        if instruction.opcode == 0x5b:
+        if instruction.opcode == 0x5B:
             starts.add(instruction.pc)
         if instruction.opcode in terminators and index + 1 < len(instructions):
             starts.add(instructions[index + 1].pc)
@@ -138,7 +138,5 @@ def build_blocks(instructions: list[Instruction]) -> list[BytecodeBlock]:
         elif last.opcode not in terminators and next_block:
             destinations.append(next_block.id)
         unique_destinations = tuple(dict.fromkeys(destinations))
-        completed.append(
-            BytecodeBlock(block.id, block.pc, block.instructions, unique_destinations)
-        )
+        completed.append(BytecodeBlock(block.id, block.pc, block.instructions, unique_destinations))
     return completed

@@ -47,3 +47,31 @@ def test_docker_runner_requires_an_immutable_image_digest(tmp_path: Path) -> Non
     command = runner.command(tmp_path / "input", tmp_path / "output", "runtime.hex")
     assert "--network" in command and command[command.index("--network") + 1] == "none"
     assert "--client" in command
+
+
+def test_local_runner_uses_gigahorse_script_contract(monkeypatch, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv: list[str], **kwargs: object) -> Completed:
+        seen["argv"] = argv
+        seen.update(kwargs)
+        return Completed()
+
+    monkeypatch.setattr("evm_bytecode_decompiler.gigahorse.runner.subprocess.run", fake_run)
+    result = LocalGigahorseRunner(
+        str(tmp_path / "gigahorse.py"),
+        client=tmp_path / "client.dl",
+        commit="pinned",
+        toolchain_dir=tmp_path,
+    ).run(bytes.fromhex("6000"), tmp_path / "run", sha256="abc")
+
+    argv = seen["argv"]
+    assert result.status == "ok"
+    assert Path(argv[0]).name.startswith("python")
+    assert "-C" in argv and "-w" in argv and "-r" in argv and "-T" in argv
+    assert seen.get("shell", False) is False

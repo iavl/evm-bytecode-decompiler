@@ -5,10 +5,20 @@ client = "src/evm_bytecode_decompiler/gigahorse/client/evm_bytecode_decompiler.d
 timeout_seconds = 180
 commit = ""
 image = ""
+toolchain_dir = "vendor/gigahorse-toolchain"
 
 [rpc]
 ethereum = "${ETH_RPC_URL}"
 bsc = "${BSC_RPC_URL}"
+
+[ai]
+provider = "openai-compatible"
+model = ""
+endpoint = "https://api.openai.com/v1/chat/completions"
+temperature = 0.0
+max_concurrency = 4
+timeout_seconds = 60
+cache_dir = "~/.cache/evm-bytecode-decompiler/ai"
 
 [output]
 root = "runs"

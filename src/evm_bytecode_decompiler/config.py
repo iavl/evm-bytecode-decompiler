@@ -24,6 +24,7 @@ class GigahorseConfig:
     timeout_seconds: int = 180
     commit: str = ""
     image: str = ""
+    toolchain_dir: Path = Path("vendor/gigahorse-toolchain")
 
 
 @dataclass(frozen=True)
@@ -33,8 +34,20 @@ class OutputConfig:
 
 
 @dataclass(frozen=True)
+class AIConfig:
+    provider: str = "openai-compatible"
+    model: str = ""
+    endpoint: str = "https://api.openai.com/v1/chat/completions"
+    temperature: float = 0.0
+    max_concurrency: int = 4
+    timeout_seconds: int = 60
+    cache_dir: Path = Path.home() / ".cache" / "evm-bytecode-decompiler" / "ai"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     gigahorse: GigahorseConfig = field(default_factory=GigahorseConfig)
+    ai: AIConfig = field(default_factory=AIConfig)
     rpc: dict[str, str] = field(default_factory=dict)
     output: OutputConfig = field(default_factory=OutputConfig)
 
@@ -46,6 +59,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     with config_path.open("rb") as handle:
         raw = _expand(tomllib.load(handle))
     gh = raw.get("gigahorse", {})
+    ai = raw.get("ai", {})
     output = raw.get("output", {})
     return AppConfig(
         gigahorse=GigahorseConfig(
@@ -58,6 +72,21 @@ def load_config(path: Path | None = None) -> AppConfig:
             timeout_seconds=int(gh.get("timeout_seconds", 180)),
             commit=gh.get("commit", ""),
             image=gh.get("image", ""),
+            toolchain_dir=Path(gh.get("toolchain_dir", "vendor/gigahorse-toolchain")).expanduser(),
+        ),
+        ai=AIConfig(
+            provider=ai.get("provider", "openai-compatible"),
+            model=ai.get("model", ""),
+            endpoint=ai.get("endpoint", "https://api.openai.com/v1/chat/completions"),
+            temperature=float(ai.get("temperature", 0.0)),
+            max_concurrency=int(ai.get("max_concurrency", 4)),
+            timeout_seconds=int(ai.get("timeout_seconds", 60)),
+            cache_dir=Path(
+                ai.get(
+                    "cache_dir",
+                    str(Path.home() / ".cache" / "evm-bytecode-decompiler" / "ai"),
+                )
+            ).expanduser(),
         ),
         rpc={str(key): str(value) for key, value in raw.get("rpc", {}).items() if value},
         output=OutputConfig(

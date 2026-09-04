@@ -34,8 +34,12 @@ class DockerGigahorseRunner:
             [
                 self.image,
                 f"/input/{input_name}",
-                "--output",
-                "/output/facts",
+                "-w",
+                "/output/working",
+                "-r",
+                "/output/results.json",
+                "-T",
+                str(self.timeout_seconds),
             ]
         )
         if self.client:
@@ -84,9 +88,7 @@ class DockerGigahorseRunner:
             "unknown",
             facts,
             errors=(
-                []
-                if result.returncode == 0
-                else [f"Docker exited with status {result.returncode}"]
+                [] if result.returncode == 0 else [f"Docker exited with status {result.returncode}"]
             ),
             stdout=result.stdout,
             stderr=result.stderr,

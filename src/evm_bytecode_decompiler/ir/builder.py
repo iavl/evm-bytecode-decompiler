@@ -21,6 +21,7 @@ from ..models.ir import (
     StorageAccessIR,
     StorageLocation,
     SymbolicSlot,
+    ValueIR,
 )
 
 
@@ -195,6 +196,11 @@ def _events(
     statement_blocks: dict[str, str],
 ) -> list[EventIR]:
     events: list[EventIR] = []
+    topics: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    for row in relations.get("EventTopic", ()):
+        if len(row) < 3:
+            continue
+        topics[row[0]].append((_int(row[1], label="event topic index"), row[2]))
     for index, row in enumerate(relations.get("Event", ())):
         if len(row) < 4:
             raise IRBuildError("Event relation requires four columns")
@@ -204,10 +210,8 @@ def _events(
             EventIR(
                 id=event_id,
                 statement_id=statement_id,
-                topics=[
-                    ExpressionIR(kind="unknown", name=f"topic{topic}")
-                    for topic in range(count)
-                ],
+                topics=[_expr(value) for _, value in sorted(topics.get(event_id, []))]
+                or [ExpressionIR(kind="unknown", name=f"topic{topic}") for topic in range(count)],
                 data=_expr(data),
                 evidence=[
                     _evidence(
@@ -365,6 +369,7 @@ def build_contract_ir(
         known_functions = ["fallback"]
         entries["fallback"] = min(block_ids, key=lambda item: block_pcs[item])
         memberships["fallback"].update(block_ids)
+    seen_statement_ids: set[str] = set()
     for function_id in known_functions:
         entry = entries.get(function_id)
         if entry is None:
@@ -378,50 +383,143 @@ def build_contract_ir(
             (row[0] for row in function_rows if len(row) >= 2 and row[1] == function_id),
             None,
         )
-        function_blocks = [
-            BasicBlockIR(
-                id=block_id,
-                pc=block_pcs[block_id],
-                function_id=function_id,
-                predecessor_ids=sorted(
-                    item for item in predecessors.get(block_id, []) if item in member_ids
-                ),
-                successor_ids=sorted(
-                    set(item for item in successors.get(block_id, []) if item in member_ids)
-                ),
-                statements=statements_by_block.get(block_id, []),
-                evidence=[
-                    _evidence(
-                        evidence_source,
-                        "FunctionBlock",
-                        f"{function_id}:{block_id}",
-                        pc=block_pcs[block_id],
-                        block_id=block_id,
-                    )
-                ],
+        statement_id_map: dict[str, str] = {}
+        function_blocks: list[BasicBlockIR] = []
+        for member_block_id in sorted(member_ids, key=lambda item: block_pcs[item]):
+            function_statements: list[StatementIR] = []
+            for ir_statement in statements_by_block.get(member_block_id, []):
+                scoped_id = ir_statement.id
+                if scoped_id in seen_statement_ids:
+                    scoped_id = f"{function_id}:{ir_statement.id}"
+                while scoped_id in seen_statement_ids:
+                    scoped_id = f"{function_id}:{scoped_id}"
+                seen_statement_ids.add(scoped_id)
+                statement_id_map[ir_statement.id] = scoped_id
+                function_statements.append(
+                    ir_statement.model_copy(update={"id": scoped_id, "block_id": member_block_id})
+                )
+            function_blocks.append(
+                BasicBlockIR(
+                    id=member_block_id,
+                    pc=block_pcs[member_block_id],
+                    function_id=function_id,
+                    predecessor_ids=sorted(
+                        item for item in predecessors.get(member_block_id, []) if item in member_ids
+                    ),
+                    successor_ids=sorted(
+                        set(
+                            item
+                            for item in successors.get(member_block_id, [])
+                            if item in member_ids
+                        )
+                    ),
+                    statements=function_statements,
+                    evidence=[
+                        _evidence(
+                            evidence_source,
+                            "FunctionBlock",
+                            f"{function_id}:{member_block_id}",
+                            pc=block_pcs[member_block_id],
+                            block_id=member_block_id,
+                        )
+                    ],
+                )
             )
-            for block_id in sorted(member_ids, key=lambda item: block_pcs[item])
-        ]
-        function_statement_ids = {
-            statement.id for block in function_blocks for statement in block.statements
-        }
+        calldata_loads = sum(
+            statement.opcode == "CALLDATALOAD"
+            for block in function_blocks
+            for statement in block.statements
+        )
+        has_return = any(
+            statement.opcode == "RETURN"
+            for block in function_blocks
+            for statement in block.statements
+        )
+        function_storage = set(statement_id_map)
         function_call_ids = {
-            call.statement_id for call in calls if call.statement_id in function_statement_ids
+            call.statement_id for call in calls if call.statement_id in function_storage
         }
-        function_calls = [call for call in calls if call.statement_id in function_call_ids]
-        function_storage = {
-            statement.id for block in function_blocks for statement in block.statements
-        }
-        function_reads = [item for item in reads if item.statement_id in function_storage]
-        function_writes = [item for item in writes if item.statement_id in function_storage]
-        function_events = [item for item in events if item.statement_id in function_storage]
-        function_reverts = [item for item in reverts if item.statement_id in function_storage]
+        function_calls = [
+            call.model_copy(
+                update={
+                    "statement_id": statement_id_map.get(call.statement_id, call.statement_id),
+                    "id": (
+                        call.id
+                        if statement_id_map.get(call.statement_id) == call.statement_id
+                        else f"{function_id}:{call.id}"
+                    ),
+                }
+            )
+            for call in calls
+            if call.statement_id in function_call_ids
+        ]
+        function_reads = [
+            item.model_copy(
+                update={
+                    "statement_id": statement_id_map[item.statement_id],
+                    "id": (
+                        item.id
+                        if statement_id_map[item.statement_id] == item.statement_id
+                        else f"{function_id}:{item.id}"
+                    ),
+                }
+            )
+            for item in reads
+            if item.statement_id in function_storage
+        ]
+        function_writes = [
+            item.model_copy(
+                update={
+                    "statement_id": statement_id_map[item.statement_id],
+                    "id": (
+                        item.id
+                        if statement_id_map[item.statement_id] == item.statement_id
+                        else f"{function_id}:{item.id}"
+                    ),
+                }
+            )
+            for item in writes
+            if item.statement_id in function_storage
+        ]
+        function_events = [
+            item.model_copy(
+                update={
+                    "statement_id": statement_id_map[item.statement_id],
+                    "id": (
+                        item.id
+                        if statement_id_map[item.statement_id] == item.statement_id
+                        else f"{function_id}:{item.id}"
+                    ),
+                }
+            )
+            for item in events
+            if item.statement_id in function_storage
+        ]
+        function_reverts = [
+            item.model_copy(
+                update={
+                    "statement_id": statement_id_map[item.statement_id],
+                    "id": (
+                        item.id
+                        if statement_id_map[item.statement_id] == item.statement_id
+                        else f"{function_id}:{item.id}"
+                    ),
+                }
+            )
+            for item in reverts
+            if item.statement_id in function_storage
+        ]
         functions.append(
             FunctionIR(
                 id=function_id,
                 selector=selector,
                 entry_block=entry,
                 blocks=function_blocks,
+                arguments=[
+                    ValueIR(id=f"arg{index}", type_hint="uint256")
+                    for index in range(calldata_loads)
+                ],
+                returns=[ValueIR(id="ret0", type_hint="uint256")] if has_return else [],
                 external_calls=function_calls,
                 storage_reads=function_reads,
                 storage_writes=function_writes,

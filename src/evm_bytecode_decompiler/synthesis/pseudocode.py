@@ -1,6 +1,7 @@
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
+from ..ai.schemas import PseudoFunction, PseudoStatement
 from ..inference.abi import InferredABI, InferredFunction
 from ..inference.storage import StorageLayoutEntry
 from ..models.ir import (
@@ -16,6 +17,7 @@ from ..models.ir import (
     StorageAccessIR,
     SymbolicSlot,
 )
+from .names import safe_identifier
 
 
 def expression_text(expression: ExpressionIR | None) -> str:
@@ -118,8 +120,77 @@ def _function_info(abi: InferredABI, function: FunctionIR) -> InferredFunction |
     return next((item for item in abi.functions if item.function_id == function.id), None)
 
 
+def _pseudo_statement_lines(
+    statement: PseudoStatement, *, indent: str, annotated: bool
+) -> list[str]:
+    if statement.kind in {"if", "loop"}:
+        keyword = "if" if statement.kind == "if" else "while"
+        lines = [f"{indent}{keyword} ({statement.condition or '<unknown condition>'}) {{"]
+        for child in statement.body:
+            lines.extend(
+                _pseudo_statement_lines(child, indent=indent + "    ", annotated=annotated)
+            )
+        lines.append(f"{indent}}}")
+    elif statement.kind == "unknown":
+        lines = [f"{indent}// unresolved: {statement.unresolved or '<unknown construct>'}"]
+    elif statement.kind == "revert":
+        lines = [f"{indent}revert();"]
+    elif statement.kind == "return":
+        lines = [f"{indent}return {statement.value or '<unknown>'};"]
+    elif statement.kind == "event":
+        lines = [f"{indent}emit {statement.target or 'Log'}({statement.value or '<unknown>'});"]
+    elif statement.kind in {"call", "delegatecall", "staticcall"}:
+        call_type = statement.call_type or statement.kind
+        lines = [
+            f"{indent}<unknown result> = {statement.target or '<unknown target>'}."
+            f"{call_type}({statement.value or '<unknown calldata>'});"
+        ]
+    elif statement.kind in {"create", "create2"}:
+        init_code = statement.value or "<unknown init code>"
+        lines = [f"{indent}<unknown address> = {statement.kind}({init_code});"]
+    elif statement.kind == "storage_write":
+        lines = [
+            f"{indent}{statement.target or 'storage[unknown]'} = {statement.value or '<unknown>'};"
+        ]
+    elif statement.kind == "storage_read":
+        lines = [
+            f"{indent}{statement.target or '<unknown value>'} = "
+            f"storage[{statement.value or '<unknown>'}];"
+        ]
+    else:
+        lines = [f"{indent}{statement.target or '<unknown>'} = {statement.value or '<unknown>'};"]
+    if annotated and statement.evidence_refs:
+        lines[-1] += f" // evidence: {', '.join(statement.evidence_refs)}"
+    return lines
+
+
+def render_pseudo_function(pseudo: PseudoFunction, *, annotated: bool = False) -> list[str]:
+    name = safe_identifier(
+        pseudo.name,
+        f"func_{pseudo.selector}" if pseudo.selector else "fallback",
+    )
+    args = ", ".join(
+        f"{argument.type_name} {safe_identifier(argument.name, 'arg')}"
+        for argument in pseudo.arguments
+    )
+    lines = [f"    function {name}({args}) external {{"]
+    if not pseudo.body:
+        lines.append("        // no structured statements")
+    for statement in pseudo.body:
+        lines.extend(_pseudo_statement_lines(statement, indent="        ", annotated=annotated))
+    for unresolved in pseudo.unresolved:
+        lines.append(f"        // unresolved: {unresolved}")
+    lines.append("    }")
+    return lines
+
+
 def render_contract(
-    contract: ContractIR, abi: InferredABI, storage: Iterable[StorageLayoutEntry]
+    contract: ContractIR,
+    abi: InferredABI,
+    storage: Iterable[StorageLayoutEntry],
+    *,
+    pseudo_functions: Mapping[str, PseudoFunction] | None = None,
+    annotated: bool = False,
 ) -> str:
     lines = [
         "// EVM Bytecode Decompiler semantic decompilation",
@@ -147,12 +218,19 @@ def render_contract(
                 lines.append(
                     f"    // signature candidate: {candidate.signature} ({candidate.source})"
                 )
-        lines.append(f"    function {name}({args}) external {{")
-        for block in function.blocks:
-            lines.append(f"        // basic block {block.id} @ pc {block.pc}")
-            for statement in block.statements:
-                lines.append(f"        {_statement_text(statement, function)}")
-        lines.append("    }")
+        pseudo = pseudo_functions.get(function.id) if pseudo_functions else None
+        if pseudo:
+            lines.extend(render_pseudo_function(pseudo, annotated=annotated))
+        else:
+            lines.append(f"    function {name}({args}) external {{")
+            for block in function.blocks:
+                lines.append(f"        // basic block {block.id} @ pc {block.pc}")
+                for statement in block.statements:
+                    rendered = _statement_text(statement, function)
+                    if annotated:
+                        rendered += f" // evidence: {statement.id}"
+                    lines.append(f"        {rendered}")
+            lines.append("    }")
         lines.append("")
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -160,12 +238,17 @@ def render_contract(
 
 def render_storage_layout(storage: Iterable[StorageLayoutEntry]) -> str:
     return (
-        json.dumps({"storage": [item.model_dump(mode="json") for item in storage]}, indent=2)
-        + "\n"
+        json.dumps({"storage": [item.model_dump(mode="json") for item in storage]}, indent=2) + "\n"
     )
 
 
-def render_evidence_map(contract: ContractIR, abi: InferredABI) -> str:
+def render_evidence_map(
+    contract: ContractIR,
+    abi: InferredABI,
+    *,
+    annotations: Mapping[str, object] | None = None,
+    pseudo_functions: Mapping[str, PseudoFunction] | None = None,
+) -> str:
     functions: dict[str, object] = {}
     for function in contract.functions:
         info = _function_info(abi, function)
@@ -177,9 +260,19 @@ def render_evidence_map(contract: ContractIR, abi: InferredABI) -> str:
                     "opcode": statement.opcode,
                     "evidence": [item.model_dump(mode="json") for item in statement.evidence],
                 }
-        functions[function.id] = {
+        item: dict[str, object] = {
             "selector": function.selector,
             "name": info.name if info else function.id,
             "statements": statements,
         }
+        if annotations and function.id in annotations:
+            annotation = annotations[function.id]
+            item["semantic_annotation"] = (
+                annotation.model_dump(mode="json")
+                if hasattr(annotation, "model_dump")
+                else annotation
+            )
+        if pseudo_functions and function.id in pseudo_functions:
+            item["structured_synthesis"] = pseudo_functions[function.id].model_dump(mode="json")
+        functions[function.id] = item
     return json.dumps({"functions": functions}, indent=2) + "\n"

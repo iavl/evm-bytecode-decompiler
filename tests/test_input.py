@@ -33,6 +33,12 @@ def test_block_tag_preserves_explicit_history() -> None:
     assert block_tag(None) == "latest"
 
 
+def test_long_raw_hex_is_not_probed_as_a_filename() -> None:
+    normalized = normalize_target("0x" + "60" * 600)
+    assert normalized.metadata.kind.value == "raw"
+    assert normalized.metadata.bytecode_size == 600
+
+
 def test_historical_rpc_request_does_not_use_latest(monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[dict[str, object]] = []
 

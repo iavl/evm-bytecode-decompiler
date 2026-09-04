@@ -1,0 +1,3 @@
+[submodule "vendor/gigahorse-toolchain"]
+	path = vendor/gigahorse-toolchain
+	url = https://github.com/nevillegrech/gigahorse-toolchain.git
