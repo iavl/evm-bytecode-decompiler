@@ -1,0 +1,15 @@
+[gigahorse]
+backend = "local"
+executable = "gigahorse"
+client = "src/evm_bytecode_decompiler/gigahorse/client/evm_bytecode_decompiler.dl"
+timeout_seconds = 180
+commit = ""
+image = ""
+
+[rpc]
+ethereum = "${ETH_RPC_URL}"
+bsc = "${BSC_RPC_URL}"
+
+[output]
+root = "runs"
+keep_raw_gigahorse = true

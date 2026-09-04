@@ -1,0 +1,50 @@
+// EVM Bytecode Decompiler's narrow Gigahorse adapter boundary.
+//
+// The exact import path is supplied by the pinned Gigahorse toolchain.  Only
+// these normalized relations are consumed by Python; internal Gigahorse facts
+// must not leak into the canonical IR.
+.include "clientlib/decompiler_imports.dl"
+
+.decl PublicFunction(selector:symbol, function:symbol)
+.decl FunctionEntry(function:symbol, block:symbol)
+.decl FunctionBlock(function:symbol, block:symbol)
+.decl Block(block:symbol)
+.decl BlockSuccessor(fromBlock:symbol, toBlock:symbol)
+.decl ConditionalSuccessor(fromBlock:symbol, trueBlock:symbol, falseBlock:symbol)
+.decl Statement(statement:symbol)
+.decl StatementBlock(statement:symbol, block:symbol)
+.decl StatementPC(statement:symbol, pc:number)
+.decl StatementOpcode(statement:symbol, opcode:symbol)
+.decl StatementOperand(statement:symbol, operand:number)
+.decl Defines(statement:symbol, variable:symbol)
+.decl Uses(statement:symbol, variable:symbol)
+.decl DataFlow(sourceVariable:symbol, destVariable:symbol)
+.decl StorageLoad(statement:symbol, slotExpr:symbol, resultVariable:symbol)
+.decl StorageStore(statement:symbol, slotExpr:symbol, valueVariable:symbol)
+.decl Call(statement:symbol, callType:symbol, target:symbol, value:symbol, input:symbol, output:symbol, resultVariable:symbol)
+.decl Event(event:symbol, statement:symbol, topicCount:number, data:symbol)
+.decl Revert(revert:symbol, statement:symbol, kind:symbol)
+.decl Constant(statement:symbol, value:number)
+
+// The checked-in declarations are the contract.  The rules binding them to
+// Gigahorse internals are intentionally kept minimal and toolchain-specific.
+.output PublicFunction
+.output FunctionEntry
+.output FunctionBlock
+.output Block
+.output BlockSuccessor
+.output ConditionalSuccessor
+.output Statement
+.output StatementBlock
+.output StatementPC
+.output StatementOpcode
+.output StatementOperand
+.output Defines
+.output Uses
+.output DataFlow
+.output StorageLoad
+.output StorageStore
+.output Call
+.output Event
+.output Revert
+.output Constant
