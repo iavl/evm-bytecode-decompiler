@@ -10,3 +10,4 @@ build/
 runs/
 .coverage
 .DS_Store
+plan.md
