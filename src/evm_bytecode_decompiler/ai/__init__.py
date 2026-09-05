@@ -1,4 +1,10 @@
-from .provider import AIProvider, OpenAICompatibleProvider, ProviderUsage, provider_from_environment
+from .provider import (
+    AIProvider,
+    OpenAICompatibleProvider,
+    ProviderUsage,
+    provider_from_environment,
+    provider_identity,
+)
 from .reconciliation import ReconciliationResult, run_reconciliation
 from .review_pass import ReviewPassResult, run_reviews
 from .schemas import (
@@ -9,6 +15,7 @@ from .schemas import (
     PseudoFunction,
     PseudoStatement,
     ReviewResult,
+    SemanticProposal,
 )
 from .semantic_pass import SemanticPassResult, run_function_semantics
 from .synthesis_pass import SynthesisResult, run_synthesis
@@ -21,10 +28,12 @@ __all__ = [
     "ProviderUsage",
     "PseudoContract",
     "provider_from_environment",
+    "provider_identity",
     "PseudoArgument",
     "PseudoFunction",
     "PseudoStatement",
     "ReviewResult",
+    "SemanticProposal",
     "ReconciliationResult",
     "ReviewPassResult",
     "SemanticPassResult",

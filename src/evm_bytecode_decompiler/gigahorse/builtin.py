@@ -56,11 +56,15 @@ def _expr_text(value: tuple[str, object]) -> str:
     return str(item)
 
 
-def _storage_expressions(block: BytecodeBlock) -> dict[int, str]:
+def _storage_expressions(
+    block: BytecodeBlock,
+) -> tuple[dict[int, str], dict[int, str], dict[int, tuple[str, ...]]]:
     """Recover only stack/memory shapes with unambiguous local evidence."""
     stack: list[tuple[str, object]] = []
     memory: dict[int, tuple[str, object]] = {}
     result: dict[int, str] = {}
+    values: dict[int, str] = {}
+    calls: dict[int, tuple[str, ...]] = {}
 
     def pop() -> tuple[str, object]:
         return stack.pop() if stack else ("unknown", "unknown")
@@ -77,6 +81,15 @@ def _storage_expressions(block: BytecodeBlock) -> dict[int, str]:
             stack.append(("caller", "msg.sender"))
         elif instruction.opcode == 0x35:
             stack.append(("calldata", _expr_text(pop())))
+        elif 0x80 <= instruction.opcode <= 0x8F:
+            index = instruction.opcode - 0x80
+            stack.append(stack[-1 - index] if len(stack) > index else ("unknown", "unknown"))
+        elif 0x90 <= instruction.opcode <= 0x9F:
+            index = instruction.opcode - 0x8F
+            if len(stack) > index:
+                stack[-1], stack[-1 - index] = stack[-1 - index], stack[-1]
+        elif instruction.opcode == 0x50:
+            pop()
         elif instruction.opcode == 0x52:
             offset = constant(pop())
             value = pop()
@@ -93,14 +106,17 @@ def _storage_expressions(block: BytecodeBlock) -> dict[int, str]:
             if size == 64 and len(words) == 2 and all(words):
                 key = words[0]
                 base = words[1]
-                assert key is not None and base is not None
-                base_slot = constant(base)
-                if base_slot is not None:
-                    if key[0] == "mapping":
-                        nested = f"nested:{base_slot}:{key[1]}:{_expr_text(key)}"
-                        stack.append(("mapping", nested))
+                if key is not None and base is not None:
+                    base_slot = constant(base)
+                    if base_slot is not None:
+                        if key[0] == "mapping":
+                            # A nested hash needs provenance for both keys;
+                            # keep it symbolic until the stack model can prove it.
+                            stack.append(("unknown", "sha3"))
+                        else:
+                            stack.append(("mapping", f"mapping:{base_slot}:{_expr_text(key)}"))
                     else:
-                        stack.append(("mapping", f"mapping:{base_slot}:{_expr_text(key)}"))
+                        stack.append(("unknown", "sha3"))
                 else:
                     stack.append(("unknown", "sha3"))
             else:
@@ -116,14 +132,29 @@ def _storage_expressions(block: BytecodeBlock) -> dict[int, str]:
             stack.append(("sload", f"sload@{instruction.pc:04x}"))
         elif instruction.opcode == 0x55:
             slot = pop()
-            pop()  # value; the relation records the nearest deterministic variable separately.
+            value = pop()
             if slot[0] == "constant":
                 result[instruction.pc] = f"fixed:{slot[1]}"
             elif slot[0] == "mapping":
                 result[instruction.pc] = str(slot[1])
             else:
                 result[instruction.pc] = "symbolic:sstore"
-    return result
+            values[instruction.pc] = _expr_text(value)
+        elif instruction.opcode in {0xF0, 0xF1, 0xF2, 0xF4, 0xF5, 0xFA, 0xFF}:
+            arity = {
+                0xF0: 3,
+                0xF1: 7,
+                0xF2: 7,
+                0xF4: 6,
+                0xF5: 4,
+                0xFA: 6,
+                0xFF: 1,
+            }[instruction.opcode]
+            args = [_expr_text(pop()) for _ in range(arity)][::-1]
+            calls[instruction.pc] = tuple(args)
+            if instruction.opcode != 0xFF:
+                stack.append(("unknown", f"result@{instruction.pc:04x}"))
+    return result, values, calls
 
 
 def build_builtin_relations(code: bytes) -> RelationSet:
@@ -137,11 +168,14 @@ def build_builtin_relations(code: bytes) -> RelationSet:
         "BlockSuccessor": [
             (block.id, successor) for block in blocks for successor in block.successors
         ],
+        "ConditionalSuccessor": [],
         "Statement": [],
         "StatementBlock": [],
         "StatementPC": [],
         "StatementOpcode": [],
         "StatementOperand": [],
+        "StatementOperandSize": [],
+        "StatementTruncated": [],
         "Constant": [],
         "FunctionBlock": [],
         "FunctionEntry": [],
@@ -152,13 +186,18 @@ def build_builtin_relations(code: bytes) -> RelationSet:
         "StorageLoad": [],
         "StorageStore": [],
         "Call": [],
+        "CallDetail": [],
         "Event": [],
         "EventTopic": [],
         "Revert": [],
     }
     for block in blocks:
-        previous_variable: str | None = None
-        stack_facts = _storage_expressions(block)
+        if block.instructions and block.instructions[-1].opcode == 0x57:
+            if len(block.successors) == 2:
+                relations["ConditionalSuccessor"].append(
+                    (block.id, block.successors[0], block.successors[1])
+                )
+        stack_facts, storage_values, call_details = _storage_expressions(block)
         for instruction in block.instructions:
             statement = f"S_{instruction.pc:04x}"
             variable = f"v_{instruction.pc:04x}"
@@ -169,17 +208,17 @@ def build_builtin_relations(code: bytes) -> RelationSet:
             if instruction.operand is not None:
                 relations["StatementOperand"].append((statement, str(instruction.operand)))
                 relations["Constant"].append((statement, str(instruction.operand)))
-            if previous_variable:
-                relations["Uses"].append((statement, previous_variable))
-                relations["DataFlow"].append((previous_variable, variable))
+            if instruction.opcode >= 0x60 and instruction.opcode <= 0x7F:
+                relations["StatementOperandSize"].append((statement, str(instruction.operand_size)))
+            if instruction.truncated:
+                relations["StatementTruncated"].append((statement, "true"))
             if instruction.operand is not None or instruction.opcode in {0x35, 0x54}:
                 relations["Defines"].append((statement, variable))
-                previous_variable = variable
             if instruction.opcode == 0x54:
                 slot = stack_facts.get(instruction.pc, "symbolic:sload")
                 relations["StorageLoad"].append((statement, slot, variable))
             elif instruction.opcode == 0x55:
-                value = previous_variable or "unknown"
+                value = storage_values.get(instruction.pc, "unknown")
                 slot = stack_facts.get(instruction.pc, "symbolic:sstore")
                 relations["StorageStore"].append((statement, slot, value))
             elif instruction.opcode in {0xF0, 0xF1, 0xF2, 0xF4, 0xF5, 0xFA, 0xFF}:
@@ -192,9 +231,54 @@ def build_builtin_relations(code: bytes) -> RelationSet:
                     0xFA: "staticcall",
                     0xFF: "selfdestruct",
                 }[instruction.opcode]
-                relations["Call"].append(
-                    (statement, call_type, "unknown", "unknown", "unknown", "unknown", variable)
+                args = call_details.get(instruction.pc, ())
+                padded = list(args) + ["unknown"] * (7 - len(args))
+                target = padded[1] if instruction.opcode in {0xF1, 0xF2, 0xF4, 0xFA} else "unknown"
+                value = (
+                    padded[2]
+                    if instruction.opcode in {0xF1, 0xF2}
+                    else (padded[0] if instruction.opcode in {0xF0, 0xF5} else "unknown")
                 )
+                input_expr = (
+                    f"range:{padded[3]}:{padded[4]}"
+                    if instruction.opcode in {0xF1, 0xF2, 0xF4, 0xFA}
+                    else f"range:{padded[1]}:{padded[2]}"
+                    if instruction.opcode in {0xF0, 0xF5}
+                    else "unknown"
+                )
+                output_expr = (
+                    f"range:{padded[5]}:{padded[6]}"
+                    if instruction.opcode in {0xF1, 0xF2, 0xF4, 0xFA}
+                    else "unknown"
+                )
+                relations["Call"].append(
+                    (statement, call_type, target, value, input_expr, output_expr, variable)
+                )
+                if instruction.opcode == 0xFF:
+                    detail: tuple[str, ...] = (
+                        "unknown",
+                        "unknown",
+                        "unknown",
+                        "unknown",
+                        "unknown",
+                        "unknown",
+                        "unknown",
+                        padded[0],
+                    )
+                elif instruction.opcode in {0xF0, 0xF5}:
+                    detail = (
+                        "unknown",
+                        "unknown",
+                        padded[0],
+                        padded[1],
+                        padded[2],
+                        "unknown",
+                        "unknown",
+                        padded[3] if instruction.opcode == 0xF5 else "unknown",
+                    )
+                else:
+                    detail = tuple(padded[:7]) + ("unknown",)
+                relations["CallDetail"].append((statement, *detail))
             elif 0xA0 <= instruction.opcode <= 0xA4:
                 event_id = f"E_{instruction.pc:04x}"
                 topic_count = instruction.opcode - 0xA0
@@ -206,15 +290,6 @@ def build_builtin_relations(code: bytes) -> RelationSet:
                         "unknown",
                     )
                 )
-                pushes = [
-                    item.operand
-                    for item in block.instructions[: block.instructions.index(instruction)]
-                    if item.operand is not None
-                ]
-                for topic_index, topic_value in enumerate(
-                    pushes[-topic_count:] if topic_count else []
-                ):
-                    relations["EventTopic"].append((event_id, str(topic_index), str(topic_value)))
             elif instruction.opcode in {0xFD, 0xFE}:
                 kind = "revert" if instruction.opcode == 0xFD else "invalid"
                 relations["Revert"].append((f"R_{instruction.pc:04x}", statement, kind))
@@ -239,10 +314,11 @@ def write_builtin_workspace(code: bytes, output_dir: Path, *, sha256: str) -> No
     (output_dir / "results.json").write_text(
         json.dumps(
             {
-                "status": "ok",
+                "status": "partial",
                 "backend": "builtin-fallback",
                 "version": "builtin-evm-lifter-1",
                 "commit": "builtin",
+                "completeness": "partial",
                 "bytecode_sha256": sha256,
             },
             indent=2,

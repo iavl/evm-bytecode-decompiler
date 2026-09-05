@@ -1,16 +1,19 @@
 import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Literal, cast
 
-from .runner import GigahorseResult, _text
+from .relations import RELATION_SCHEMA_VERSION
+from .runner import GigahorseResult, _collect_facts, _text
 
 
 class DockerGigahorseRunner:
     def __init__(
         self, image: str, *, timeout_seconds: int = 180, client: Path | None = None
     ) -> None:
-        if not image or "@sha256:" not in image:
+        if not re.search(r"@sha256:[0-9a-fA-F]{64}$", image):
             raise ValueError("Docker Gigahorse image must be pinned by digest")
         self.image = image
         self.timeout_seconds = timeout_seconds
@@ -23,6 +26,10 @@ class DockerGigahorseRunner:
             "--rm",
             "--network",
             "none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt",
+            "no-new-privileges:true",
             "-v",
             f"{input_dir}:/input:ro",
             "-v",
@@ -77,19 +84,36 @@ class DockerGigahorseRunner:
                     errors=["Docker Gigahorse timed out"],
                     stdout=_text(exc.stdout),
                     stderr=_text(exc.stderr),
+                    backend="docker",
                 )
             except OSError as exc:
-                return GigahorseResult("error", "unknown", "unknown", facts, errors=[str(exc)])
+                return GigahorseResult(
+                    "error", "unknown", "unknown", facts, errors=[str(exc)], backend="docker"
+                )
         (output_dir / "stdout.log").write_text(result.stdout, encoding="utf-8")
         (output_dir / "stderr.log").write_text(result.stderr, encoding="utf-8")
+        fact_count = _collect_facts(output_dir / "working", facts)
+        if fact_count:
+            (facts / "schema.json").write_text(
+                json.dumps({"version": RELATION_SCHEMA_VERSION}) + "\n", encoding="utf-8"
+            )
+        raw_results = output_dir / "results.json"
+        if raw_results.is_file():
+            (output_dir / "raw-results.json").write_bytes(raw_results.read_bytes())
+        status: Literal["ok", "error"] = "ok" if result.returncode == 0 else "error"
+        errors = []
+        if result.returncode != 0:
+            errors.append(f"Docker exited with status {result.returncode}")
+        warnings = ["Docker Gigahorse produced no relation files"] if not fact_count else []
         return GigahorseResult(
-            "ok" if result.returncode == 0 else "error",
+            cast(Literal["ok", "partial", "timeout", "error"], status),
             "unknown",
             "unknown",
             facts,
-            errors=(
-                [] if result.returncode == 0 else [f"Docker exited with status {result.returncode}"]
-            ),
+            errors=errors,
+            warnings=warnings,
             stdout=result.stdout,
             stderr=result.stderr,
+            backend="docker",
+            completeness="full" if fact_count else "partial",
         )

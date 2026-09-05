@@ -3,6 +3,15 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+class SemanticProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence_refs: list[str] = Field(default_factory=list)
+    origin: Literal["ai_inferred", "heuristic", "external_signature"] = "ai_inferred"
+
+
 class FunctionSemanticAnnotation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -18,6 +27,7 @@ class FunctionSemanticAnnotation(BaseModel):
     uncertainties: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
     claimed_constants: list[str] = Field(default_factory=list)
+    proposals: dict[str, SemanticProposal] = Field(default_factory=dict)
 
 
 class ContractSemanticReconciliation(BaseModel):
@@ -52,6 +62,7 @@ class PseudoStatement(BaseModel):
         "call",
         "delegatecall",
         "staticcall",
+        "selfdestruct",
         "event",
         "return",
         "create",

@@ -1,5 +1,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..gigahorse.parser import disassemble
+
 
 class ProxyDetection(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -35,6 +37,6 @@ def detect_proxy(code: bytes) -> ProxyDetection:
             confidence=0.99,
             implementation_address=address,
         )
-    if 0xF4 in code:
+    if any(instruction.opcode == 0xF4 for instruction in disassemble(code)):
         return ProxyDetection(detected=True, kind="delegatecall_fallback", confidence=0.60)
     return ProxyDetection(detected=False, confidence=1.0)

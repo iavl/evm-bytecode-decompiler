@@ -3,16 +3,37 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..cache.keys import cache_key
+from ..cache.keys import cache_key, schema_hash
 from ..cache.store import CacheStore
 from ..errors import AIProviderError, AIResponseValidationError
 from ..inference.storage import StorageLayoutEntry
 from ..models.ir import ContractIR
 from .prompts import load_prompt, prompt_hash
-from .provider import AIProvider
+from .provider import AIProvider, provider_identity
 from .schemas import ContractSemanticReconciliation, FunctionSemanticAnnotation
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+RESERVED_IDENTIFIERS = {
+    "break",
+    "case",
+    "contract",
+    "else",
+    "external",
+    "false",
+    "function",
+    "if",
+    "import",
+    "internal",
+    "mapping",
+    "new",
+    "private",
+    "public",
+    "return",
+    "struct",
+    "true",
+    "uint256",
+    "while",
+}
 
 
 @dataclass
@@ -79,14 +100,29 @@ def validate_reconciliation(
     known_evidence.update(item.id for item in contract.external_calls)
     known_evidence.update(item.id for item in contract.events)
     known_evidence.update(item.id for item in contract.reverts)
+    known_evidence.update(
+        reference.fact_id
+        for item in (
+            contract.storage + contract.external_calls + contract.events + contract.reverts
+        )
+        for reference in item.evidence
+        if reference.fact_id
+    )
     unknown_evidence = sorted(set(semantics.evidence_refs) - known_evidence)
     if unknown_evidence:
         raise AIResponseValidationError(
             f"reconciliation references unknown evidence: {unknown_evidence}"
         )
+    if (
+        semantics.storage_labels or semantics.roles or semantics.patterns
+    ) and not semantics.evidence_refs:
+        raise AIResponseValidationError("contract semantic claims must cite evidence")
     names = list(semantics.function_names.values()) + list(semantics.storage_labels.values())
-    if any(not IDENTIFIER_RE.fullmatch(name) for name in names):
+    if any(not IDENTIFIER_RE.fullmatch(name) or name in RESERVED_IDENTIFIERS for name in names):
         raise AIResponseValidationError("reconciliation contains an invalid identifier")
+    storage_names = list(semantics.storage_labels.values())
+    if len(storage_names) != len(set(storage_names)):
+        raise AIResponseValidationError("reconciliation contains duplicate storage identifiers")
     return semantics
 
 
@@ -98,14 +134,18 @@ async def run_reconciliation(
     provider: AIProvider,
     cache: CacheStore | None = None,
     temperature: float = 0.0,
+    max_prompt_bytes: int = 128 * 1024,
 ) -> ReconciliationResult:
+    if max_prompt_bytes < 1:
+        return ReconciliationResult(rejected="max_prompt_bytes must be positive")
     context = contract_semantic_slice(contract, annotations, storage)
     version = prompt_hash("contract_reconcile.v1.md")
     key = cache_key(
         context,
         prompt_version=version,
-        model=getattr(provider, "model", "unknown"),
+        model=provider_identity(provider),
         schema_version=1,
+        schema_hash=schema_hash(ContractSemanticReconciliation),
     )
     if cache:
         cached = cache.get(key)
@@ -121,9 +161,17 @@ async def run_reconciliation(
                 usage.cache_hits += 1
             return ReconciliationResult(semantics=semantics, cache_hit=True)
     try:
+        prompt = json.dumps(context, sort_keys=True, indent=2)
+        if len(prompt.encode("utf-8")) > max_prompt_bytes:
+            return ReconciliationResult(
+                rejected=(
+                    f"reconciliation prompt exceeds {max_prompt_bytes} bytes; "
+                    "input was not truncated"
+                )
+            )
         semantics = await provider.generate_structured(
             system=load_prompt("contract_reconcile.v1.md"),
-            prompt=json.dumps(context, sort_keys=True, indent=2),
+            prompt=prompt,
             schema=ContractSemanticReconciliation,
             temperature=temperature,
         )

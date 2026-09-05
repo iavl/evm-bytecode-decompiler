@@ -33,6 +33,7 @@ class EvidenceRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: EvidenceSource
+    schema_version: int = Field(default=1, ge=1)
     relation: str | None = None
     fact_id: str | None = None
     pc: int | None = Field(default=None, ge=0)

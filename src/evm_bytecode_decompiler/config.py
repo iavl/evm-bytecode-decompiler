@@ -18,13 +18,19 @@ def _expand(value: Any) -> Any:
 
 @dataclass(frozen=True)
 class GigahorseConfig:
-    backend: str = "local"
+    backend: str = "auto"
     executable: str = "gigahorse"
     client: str = "src/evm_bytecode_decompiler/gigahorse/client/evm_bytecode_decompiler.dl"
     timeout_seconds: int = 180
     commit: str = ""
     image: str = ""
     toolchain_dir: Path = Path("vendor/gigahorse-toolchain")
+
+    def __post_init__(self) -> None:
+        if self.backend not in {"auto", "local", "docker", "builtin"}:
+            raise ValueError(f"unsupported Gigahorse backend: {self.backend}")
+        if self.timeout_seconds < 1:
+            raise ValueError("Gigahorse timeout_seconds must be positive")
 
 
 @dataclass(frozen=True)
@@ -41,7 +47,14 @@ class AIConfig:
     temperature: float = 0.0
     max_concurrency: int = 4
     timeout_seconds: int = 60
+    max_prompt_bytes: int = 128 * 1024
     cache_dir: Path = Path.home() / ".cache" / "evm-bytecode-decompiler" / "ai"
+
+    def __post_init__(self) -> None:
+        if self.max_concurrency < 1 or self.timeout_seconds < 1 or self.max_prompt_bytes < 1:
+            raise ValueError("AI concurrency, timeout, and prompt limit must be positive")
+        if not 0.0 <= self.temperature <= 2.0:
+            raise ValueError("AI temperature must be between 0 and 2")
 
 
 @dataclass(frozen=True)
@@ -63,7 +76,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     output = raw.get("output", {})
     return AppConfig(
         gigahorse=GigahorseConfig(
-            backend=gh.get("backend", "local"),
+            backend=gh.get("backend", "auto"),
             executable=gh.get("executable", "gigahorse"),
             client=gh.get(
                 "client",
@@ -81,6 +94,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             temperature=float(ai.get("temperature", 0.0)),
             max_concurrency=int(ai.get("max_concurrency", 4)),
             timeout_seconds=int(ai.get("timeout_seconds", 60)),
+            max_prompt_bytes=int(ai.get("max_prompt_bytes", 128 * 1024)),
             cache_dir=Path(
                 ai.get(
                     "cache_dir",

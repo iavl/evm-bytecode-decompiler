@@ -53,7 +53,10 @@ def _location_text(access: StorageAccessIR) -> str:
 
 
 def _statement_text(statement: StatementIR, function: FunctionIR) -> str:
-    variable = statement.defines[0] if statement.defines else f"v_{statement.pc:04x}"
+    pc_text = f"{statement.pc:04x}" if statement.pc is not None else "unknown"
+    variable = statement.defines[0] if statement.defines else f"v_{pc_text}"
+    if statement.truncated:
+        return f"// pc {pc_text}: {statement.opcode} (truncated operand, unresolved)"
     if statement.opcode.startswith("PUSH"):
         literal = hex(statement.operand or 0)
         return f"uint256 {variable} = {literal};"
@@ -70,7 +73,7 @@ def _statement_text(statement: StatementIR, function: FunctionIR) -> str:
             (item for item in function.storage_writes if item.statement_id == statement.id),
             None,
         )
-        value = statement.uses[-1] if statement.uses else "<unknown>"
+        value = expression_text(access.value) if access and access.value else "<unknown>"
         return f"{_location_text(access) if access else 'storage[unknown]'} = {value};"
     if statement.opcode in {
         "CALL",
@@ -91,6 +94,16 @@ def _statement_text(statement: StatementIR, function: FunctionIR) -> str:
         count = len(event.topics) if event else int(statement.opcode[3:] or 0)
         return f"emit Log{count}(<unknown data>);"
     if statement.opcode == "JUMPI":
+        block = next(
+            (item for item in function.blocks if statement.id in {s.id for s in item.statements}),
+            None,
+        )
+        if block and block.true_successor_id and block.false_successor_id:
+            return (
+                "if (<unknown condition>) { "
+                f"goto {block.true_successor_id}; }} else {{ "
+                f"goto {block.false_successor_id}; }}"
+            )
         return "if (<unknown condition>) { goto <unknown destination>; }"
     if statement.opcode == "JUMP":
         return "goto <unknown destination>;"
@@ -102,18 +115,21 @@ def _statement_text(statement: StatementIR, function: FunctionIR) -> str:
         return "invalid();"
     if statement.opcode == "STOP":
         return "return;"
-    return f"// pc {statement.pc}: {statement.opcode} (raw deterministic operation)"
+    return (
+        f"// pc {statement.pc if statement.pc is not None else '<unknown>'}: "
+        f"{statement.opcode} (raw deterministic operation)"
+    )
 
 
 def _call_text(call: CallIR | None, variable: str) -> str:
     if call is None:
         return "// unresolved low-level call"
     if call.call_type == "selfdestruct":
-        return "selfdestruct(<unknown beneficiary>);"
+        return f"selfdestruct({expression_text(call.beneficiary)});"
     if call.call_type in {"create", "create2"}:
-        return f"address {variable} = {call.call_type}(<unknown init code>);"
+        return f"address {variable} = {call.call_type}({expression_text(call.input)});"
     target = expression_text(call.target)
-    return f"bool {variable} = {target}.{call.call_type}(<unknown calldata>);"
+    return f"bool {variable} = {target}.{call.call_type}({expression_text(call.input)});"
 
 
 def _function_info(abi: InferredABI, function: FunctionIR) -> InferredFunction | None:
@@ -139,12 +155,15 @@ def _pseudo_statement_lines(
         lines = [f"{indent}return {statement.value or '<unknown>'};"]
     elif statement.kind == "event":
         lines = [f"{indent}emit {statement.target or 'Log'}({statement.value or '<unknown>'});"]
-    elif statement.kind in {"call", "delegatecall", "staticcall"}:
-        call_type = statement.call_type or statement.kind
-        lines = [
-            f"{indent}<unknown result> = {statement.target or '<unknown target>'}."
-            f"{call_type}({statement.value or '<unknown calldata>'});"
-        ]
+    elif statement.kind in {"call", "delegatecall", "staticcall", "selfdestruct"}:
+        if statement.kind == "selfdestruct":
+            lines = [f"{indent}selfdestruct({statement.value or '<unknown beneficiary>'});"]
+        else:
+            call_type = statement.call_type or statement.kind
+            lines = [
+                f"{indent}<unknown result> = {statement.target or '<unknown target>'}."
+                f"{call_type}({statement.value or '<unknown calldata>'});"
+            ]
     elif statement.kind in {"create", "create2"}:
         init_code = statement.value or "<unknown init code>"
         lines = [f"{indent}<unknown address> = {statement.kind}({init_code});"]
@@ -206,32 +225,93 @@ def render_contract(
         lines.append("")
     for function in contract.functions:
         info = _function_info(abi, function)
+        pseudo = pseudo_functions.get(function.id) if pseudo_functions else None
         name = (
             info.name
             if info
             else (f"func_{function.selector}" if function.selector else "fallback")
         )
-        args = ", ".join(f"uint256 {arg}" for arg in (info.arguments if info else []))
+        if pseudo:
+            name = safe_identifier(pseudo.name, name)
+        if pseudo and pseudo.arguments:
+            args = ", ".join(
+                f"uint256 {safe_identifier(argument.name, 'arg')}" for argument in pseudo.arguments
+            )
+        else:
+            args = ", ".join(f"uint256 {arg}" for arg in (info.arguments if info else []))
         lines.append(f"    // selector: {function.selector or '<fallback>'}")
         if info and info.candidates:
             for candidate in info.candidates:
                 lines.append(
                     f"    // signature candidate: {candidate.signature} ({candidate.source})"
                 )
-        pseudo = pseudo_functions.get(function.id) if pseudo_functions else None
-        if pseudo:
-            lines.extend(render_pseudo_function(pseudo, annotated=annotated))
-        else:
-            lines.append(f"    function {name}({args}) external {{")
-            for block in function.blocks:
-                lines.append(f"        // basic block {block.id} @ pc {block.pc}")
-                for statement in block.statements:
-                    rendered = _statement_text(statement, function)
-                    if annotated:
-                        rendered += f" // evidence: {statement.id}"
-                    lines.append(f"        {rendered}")
-            lines.append("    }")
+        # AI annotations may rename a function, but deterministic IR owns the
+        # body. This keeps AI from adding, dropping, or rewriting operations.
+        lines.append(f"    function {name}({args}) external {{")
+        for block in function.blocks:
+            lines.append(
+                f"        // basic block {block.id} @ pc "
+                f"{block.pc if block.pc is not None else '<unknown>'}"
+            )
+            for statement in block.statements:
+                rendered = _statement_text(statement, function)
+                if annotated:
+                    rendered += f" // evidence: {statement.id}"
+                lines.append(f"        {rendered}")
+        lines.append("    }")
         lines.append("")
+    unassigned = set(contract.unassigned_block_ids)
+    if unassigned:
+        lines.extend(
+            [
+                "    // Unassigned bytecode blocks (no function ownership was proven).",
+                "    function __unassigned_code() internal {",
+            ]
+        )
+        for block in contract.blocks:
+            if block.id not in unassigned:
+                continue
+            lines.append(
+                f"        // basic block {block.id} @ pc "
+                f"{block.pc if block.pc is not None else '<unknown>'}"
+            )
+            statement_ids = {statement.id for statement in block.statements}
+            view_block = block.model_copy(
+                update={
+                    "predecessor_ids": [],
+                    "successor_ids": [],
+                    "true_successor_id": None,
+                    "false_successor_id": None,
+                }
+            )
+            view_function = FunctionIR(
+                id="__unassigned_code",
+                selector=None,
+                entry_block=block.id,
+                blocks=[view_block],
+                storage_reads=[
+                    item
+                    for item in contract.storage
+                    if item.access == "read" and item.statement_id in statement_ids
+                ],
+                storage_writes=[
+                    item
+                    for item in contract.storage
+                    if item.access == "write" and item.statement_id in statement_ids
+                ],
+                external_calls=[
+                    item for item in contract.external_calls if item.statement_id in statement_ids
+                ],
+                events=[item for item in contract.events if item.statement_id in statement_ids],
+                reverts=[item for item in contract.reverts if item.statement_id in statement_ids],
+                evidence=block.evidence,
+            )
+            for statement in block.statements:
+                rendered = _statement_text(statement, view_function)
+                if annotated:
+                    rendered += f" // evidence: {statement.id}"
+                lines.append(f"        {rendered}")
+        lines.extend(["    }", ""])
     lines.append("}")
     return "\n".join(lines) + "\n"
 
@@ -262,7 +342,16 @@ def render_evidence_map(
                 }
         item: dict[str, object] = {
             "selector": function.selector,
-            "name": info.name if info else function.id,
+            "name": (
+                safe_identifier(
+                    pseudo_functions[function.id].name,
+                    info.name if info else function.id,
+                )
+                if pseudo_functions and function.id in pseudo_functions
+                else info.name
+                if info
+                else function.id
+            ),
             "statements": statements,
         }
         if annotations and function.id in annotations:
@@ -275,4 +364,19 @@ def render_evidence_map(
         if pseudo_functions and function.id in pseudo_functions:
             item["structured_synthesis"] = pseudo_functions[function.id].model_dump(mode="json")
         functions[function.id] = item
-    return json.dumps({"functions": functions}, indent=2) + "\n"
+    unassigned: dict[str, object] = {}
+    for block in contract.blocks:
+        if block.id not in contract.unassigned_block_ids:
+            continue
+        unassigned[block.id] = {
+            "pc": block.pc,
+            "statements": {
+                statement.id: {
+                    "pc": statement.pc,
+                    "opcode": statement.opcode,
+                    "evidence": [item.model_dump(mode="json") for item in statement.evidence],
+                }
+                for statement in block.statements
+            },
+        }
+    return json.dumps({"functions": functions, "unassigned_blocks": unassigned}, indent=2) + "\n"

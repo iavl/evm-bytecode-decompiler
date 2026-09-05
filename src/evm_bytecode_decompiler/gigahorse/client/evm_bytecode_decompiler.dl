@@ -50,7 +50,8 @@ EBD_StatementBlock(statement, block) :- Statement_Block(statement, block).
 .output EBD_StatementBlock(IO="file", filename="EBD_StatementBlock.csv", delimiter="\t")
 
 .decl EBD_StatementPC(statement:symbol, pc:number)
-EBD_StatementPC(statement, @hex_to_number(statement)) :- EBD_Statement(statement).
+EBD_StatementPC(statement, @hex_to_number(original)) :-
+  Statement_OriginalStatement(statement, original).
 .output EBD_StatementPC(IO="file", filename="EBD_StatementPC.csv", delimiter="\t")
 
 .decl EBD_StatementOpcode(statement:symbol, opcode:symbol)
@@ -114,6 +115,36 @@ EBD_Call(statement, "create2", "unknown", value, input, "unknown", address) :-
 EBD_Call(statement, "selfdestruct", "unknown", "unknown", "unknown", "unknown", "unknown") :-
   SELFDESTRUCT(statement, _).
 .output EBD_Call(IO="file", filename="EBD_Call.csv", delimiter="\t")
+
+.decl EBD_CallDetail(statement:symbol, gas:symbol, target:symbol, value:symbol,
+                     inputOffset:symbol, inputSize:symbol, outputOffset:symbol,
+                     outputSize:symbol, extra:symbol)
+EBD_CallDetail(statement, gas, target, value, inputOffset, inputSize,
+               outputOffset, outputSize, "unknown") :-
+  CALL(statement, gas, target, value, inputOffset, inputSize,
+       outputOffset, outputSize, _).
+EBD_CallDetail(statement, gas, target, "unknown", inputOffset, inputSize,
+               outputOffset, outputSize, "unknown") :-
+  STATICCALL(statement, gas, target, inputOffset, inputSize,
+             outputOffset, outputSize, _).
+EBD_CallDetail(statement, gas, target, "unknown", inputOffset, inputSize,
+               outputOffset, outputSize, "unknown") :-
+  DELEGATECALL(statement, gas, target, inputOffset, inputSize,
+               outputOffset, outputSize, _).
+EBD_CallDetail(statement, gas, target, value, inputOffset, inputSize,
+               outputOffset, outputSize, "unknown") :-
+  CALLCODE(statement, gas, target, value, inputOffset, inputSize,
+           outputOffset, outputSize, _).
+EBD_CallDetail(statement, "unknown", "unknown", value, inputOffset, inputSize,
+               "unknown", "unknown", "unknown") :-
+  CREATE(statement, value, inputOffset, inputSize, _).
+EBD_CallDetail(statement, "unknown", "unknown", value, inputOffset, inputSize,
+               "unknown", "unknown", salt) :-
+  CREATE2(statement, value, inputOffset, inputSize, salt, _).
+EBD_CallDetail(statement, "unknown", "unknown", "unknown", "unknown", "unknown",
+               "unknown", "unknown", beneficiary) :-
+  SELFDESTRUCT(statement, beneficiary).
+.output EBD_CallDetail(IO="file", filename="EBD_CallDetail.csv", delimiter="\t")
 
 .decl EBD_Event(event:symbol, statement:symbol, topicCount:number, data:symbol)
 EBD_Event(statement, statement, topicCount, "unknown") :-

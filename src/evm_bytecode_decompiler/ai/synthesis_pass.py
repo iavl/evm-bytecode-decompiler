@@ -2,13 +2,13 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 
-from ..cache.keys import cache_key
+from ..cache.keys import cache_key, schema_hash
 from ..cache.store import CacheStore
 from ..errors import AIProviderError, AIResponseValidationError
 from ..models.ir import ContractIR, FunctionIR
 from ..validation.hallucination import validate_pseudo_function
 from .prompts import load_prompt, prompt_hash
-from .provider import AIProvider
+from .provider import AIProvider, provider_identity
 from .reconciliation import ReconciliationResult
 from .schemas import (
     ContractSemanticReconciliation,
@@ -51,6 +51,18 @@ def synthesis_slice(
                 for item in statement.evidence
                 if item.fact_id
             }
+            | {
+                reference.fact_id
+                for item in (
+                    function.storage_reads
+                    + function.storage_writes
+                    + function.external_calls
+                    + function.events
+                    + function.reverts
+                )
+                for reference in item.evidence
+                if reference.fact_id
+            }
         ),
     }
 
@@ -68,9 +80,12 @@ async def run_synthesis(
     cache: CacheStore | None = None,
     max_concurrency: int = 4,
     temperature: float = 0.0,
+    max_prompt_bytes: int = 128 * 1024,
 ) -> SynthesisResult:
     if max_concurrency < 1:
         raise ValueError("max_concurrency must be positive")
+    if max_prompt_bytes < 1:
+        raise ValueError("max_prompt_bytes must be positive")
     result = SynthesisResult()
     semaphore = asyncio.Semaphore(max_concurrency)
     system = load_prompt("synthesize_function.v1.md")
@@ -79,10 +94,11 @@ async def run_synthesis(
     async def one(function: FunctionIR) -> None:
         context = synthesis_slice(function, annotations.get(function.id), reconciliation.semantics)
         key = cache_key(
-            context,
+            {"context": context, "temperature": temperature},
             prompt_version=version,
-            model=getattr(provider, "model", "unknown"),
+            model=provider_identity(provider),
             schema_version=1,
+            schema_hash=schema_hash(PseudoFunction),
         )
         if cache:
             cached = cache.get(key)
@@ -101,6 +117,11 @@ async def run_synthesis(
                         result.cache_hits += 1
                     return
         prompt = json.dumps(context, sort_keys=True, indent=2)
+        if len(prompt.encode("utf-8")) > max_prompt_bytes:
+            result.rejected[function.id] = (
+                f"synthesis prompt exceeds {max_prompt_bytes} bytes; function was not truncated"
+            )
+            return
         pseudo: PseudoFunction | None = None
         review = ReviewResult(severity="fail")
         for attempt in range(2):

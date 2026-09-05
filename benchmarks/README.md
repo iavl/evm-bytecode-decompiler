@@ -3,7 +3,9 @@
 The manifest contains 20 source fixtures. `benchmark run` compiles each source
 with the selected `solc` executable, then passes only the resulting runtime
 bytecode to the decompiler. Source is evaluation-only and is never included in
-the decompilation input.
+the decompilation input. Each entry also records minimum expected deterministic
+facts; strict mode reports regressions instead of treating any non-empty output
+as success.
 
 ```bash
 uv run evm-bytecode-decompiler benchmark run --output-dir runs/benchmark

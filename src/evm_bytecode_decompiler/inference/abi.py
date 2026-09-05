@@ -26,6 +26,9 @@ class InferredFunction(BaseModel):
     candidates: list[SignatureCandidate] = Field(default_factory=list)
     name_origin: str = "deterministic"
     name_confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    argument_count_origin: str = "heuristic"
+    argument_count_confidence: float = Field(default=0.4, ge=0.0, le=1.0)
+    argument_type_confidence: dict[str, float] = Field(default_factory=dict)
 
 
 class InferredABI(BaseModel):
@@ -41,7 +44,7 @@ def _argument_names(function: FunctionIR) -> list[str]:
         for statement in block.statements
         if statement.opcode == "CALLDATALOAD"
     )
-    return [f"arg{index}" for index in range(min(loads, 32))]
+    return [f"arg{index}" for index in range(loads)]
 
 
 def _argument_types(function: FunctionIR, arguments: list[str]) -> dict[str, str]:
@@ -73,6 +76,8 @@ def infer_abi(
                 name = signature_name
         name_origin = "external_signature" if candidates else "deterministic"
         name_confidence = candidates[0].confidence if candidates else 1.0
+        argument_origin = "external_signature" if candidates else "heuristic"
+        argument_confidence = candidates[0].confidence if candidates else 0.4
         inferred.append(
             InferredFunction(
                 function_id=function.id,
@@ -85,6 +90,9 @@ def infer_abi(
                 candidates=candidates,
                 name_origin=name_origin,
                 name_confidence=name_confidence,
+                argument_count_origin=argument_origin,
+                argument_count_confidence=argument_confidence,
+                argument_type_confidence={argument: argument_confidence for argument in arguments},
             )
         )
     return InferredABI(functions=inferred)

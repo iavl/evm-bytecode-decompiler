@@ -18,6 +18,14 @@ class GigahorseAnalysisError(DecompilerError):
     """Gigahorse returned a failed analysis."""
 
 
+class BackendUnavailableError(DecompilerError):
+    """The explicitly requested analysis backend is not available."""
+
+
+class ArtifactError(DecompilerError):
+    """A saved run is incomplete, inconsistent, or does not match its input."""
+
+
 class IRBuildError(DecompilerError):
     """Relations could not be converted into canonical IR."""
 

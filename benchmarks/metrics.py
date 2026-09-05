@@ -26,6 +26,18 @@ def regression_failures(results: Iterable[dict[str, Any]]) -> list[str]:
         metrics = item.get("metrics", {})
         if metrics.get("functions", 0) < 1:
             failures.append(f"{item['name']}: no function recovered")
+        expected = item.get("expected", {})
+        if isinstance(expected, dict):
+            for expected_key, minimum in expected.items():
+                if not expected_key.startswith("min_"):
+                    continue
+                metric = expected_key[4:]
+                metric = {"calls": "external_calls"}.get(metric, metric)
+                if metrics.get(metric, 0) < int(minimum):
+                    failures.append(
+                        f"{item['name']}: expected {expected_key}={minimum}, "
+                        f"got {metrics.get(metric, 0)}"
+                    )
     return failures
 
 

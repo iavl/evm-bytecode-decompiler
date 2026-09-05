@@ -18,11 +18,13 @@ Rows are sorted before they are persisted, making the adapter output stable.
 | `StatementPC` | statement, pc | Statement program counter. |
 | `StatementOpcode` | statement, opcode | Normalized opcode name. |
 | `StatementOperand` | statement, operand | Exact PUSH operand when present. |
+| `StatementOperandSize` | statement, byte count | Exact number of PUSH operand bytes read; a truncated PUSH has a smaller count. |
 | `Defines` / `Uses` | statement, variable | Def-use facts. |
 | `DataFlow` | source, destination | Variable data-flow edge. |
 | `StorageLoad` | statement, slot expression, result | Storage read. |
 | `StorageStore` | statement, slot expression, value | Storage write. |
 | `Call` | statement, call type, target, value, input, output, result | Low-level call/create fact. |
+| `CallDetail` | statement, gas, target, value, input offset, input size, output offset, output size, extra | Proven call ranges; `extra` is CREATE2 salt or SELFDESTRUCT beneficiary when available. |
 | `Event` | event, statement, topic count, data | LOG fact. |
 | `EventTopic` | event, topic index, value | Deterministic/constant LOG topic when available. |
 | `Revert` | revert, statement, kind | REVERT or INVALID fact. |

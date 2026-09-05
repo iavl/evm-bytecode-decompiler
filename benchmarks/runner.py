@@ -18,7 +18,7 @@ CONTRACTS = ROOT / "contracts"
 MANIFEST = ROOT / "manifest.json"
 
 
-def fixture_manifest() -> list[dict[str, str]]:
+def fixture_manifest() -> list[dict[str, Any]]:
     value = json.loads(MANIFEST.read_text(encoding="utf-8"))
     if not isinstance(value, list):
         raise ValueError("benchmark manifest must be a list")
@@ -36,7 +36,12 @@ def run_benchmark(
     for item in fixture_manifest():
         name = item["name"]
         source = CONTRACTS / item["source"]
-        record: dict[str, Any] = {"name": name, "source": item["source"], "status": "error"}
+        record: dict[str, Any] = {
+            "name": name,
+            "source": item["source"],
+            "status": "error",
+            "expected": item.get("expected", {}),
+        }
         try:
             runtime = compile_runtime(source, compiler=item.get("compiler", compiler))
             result = decompile(
@@ -50,6 +55,9 @@ def run_benchmark(
             record["metrics"] = deterministic_metrics(result.contract)
         except (BenchmarkCompileError, OSError, ValueError) as exc:
             record["error"] = str(exc)
+            message = str(exc).lower()
+            if "could not run" in message or "requires different compiler version" in message:
+                record["status"] = "unavailable"
         results.append(record)
     write_results(output_dir / "results.json", results)
     (output_dir / "report.md").write_text(render_benchmark_report(results), encoding="utf-8")

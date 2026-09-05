@@ -6,22 +6,41 @@ OPCODES = {
     0x02: "MUL",
     0x03: "SUB",
     0x04: "DIV",
+    0x05: "SDIV",
     0x06: "MOD",
+    0x07: "SMOD",
+    0x08: "ADDMOD",
+    0x09: "MULMOD",
+    0x0A: "EXP",
+    0x0B: "SIGNEXTEND",
     0x10: "LT",
     0x11: "GT",
+    0x12: "SLT",
+    0x13: "SGT",
     0x14: "EQ",
     0x15: "ISZERO",
     0x16: "AND",
     0x17: "OR",
+    0x18: "XOR",
     0x19: "NOT",
+    0x1A: "BYTE",
+    0x1B: "SHL",
+    0x1C: "SHR",
+    0x1D: "SAR",
     0x20: "SHA3",
     0x30: "ADDRESS",
+    0x31: "BALANCE",
+    0x32: "ORIGIN",
     0x33: "CALLER",
     0x34: "CALLVALUE",
     0x35: "CALLDATALOAD",
     0x36: "CALLDATASIZE",
     0x37: "CALLDATACOPY",
+    0x38: "CODESIZE",
     0x39: "CODECOPY",
+    0x3A: "GASPRICE",
+    0x3B: "EXTCODESIZE",
+    0x3C: "EXTCODECOPY",
     0x3D: "RETURNDATASIZE",
     0x3E: "RETURNDATACOPY",
     0x50: "POP",
@@ -32,7 +51,13 @@ OPCODES = {
     0x55: "SSTORE",
     0x56: "JUMP",
     0x57: "JUMPI",
+    0x58: "PC",
+    0x59: "MSIZE",
+    0x5A: "GAS",
     0x5B: "JUMPDEST",
+    0x5C: "TLOAD",
+    0x5D: "TSTORE",
+    0x5E: "MCOPY",
     0x5F: "PUSH0",
     0x80: "DUP1",
     0x90: "SWAP1",
@@ -61,6 +86,7 @@ class Instruction:
     name: str
     operand: int | None = None
     operand_size: int = 0
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,9 +106,12 @@ def disassemble(code: bytes) -> list[Instruction]:
         if 0x60 <= opcode <= 0x7F:
             size = opcode - 0x5F
             raw = code[pc + 1 : pc + 1 + size]
-            operand = int.from_bytes(raw, "big") if raw else None
-            instructions.append(Instruction(pc, opcode, f"PUSH{size}", operand, len(raw)))
-            pc += 1 + size
+            truncated = len(raw) != size
+            operand = int.from_bytes(raw, "big") if raw and not truncated else None
+            instructions.append(
+                Instruction(pc, opcode, f"PUSH{size}", operand, len(raw), truncated)
+            )
+            pc += 1 + len(raw)
         elif opcode == 0x5F:
             instructions.append(Instruction(pc, opcode, name, 0, 0))
             pc += 1

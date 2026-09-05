@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,10 +12,17 @@ from . import __version__
 from .cache.store import CacheStore
 from .config import load_config
 from .errors import DecompilerError
-from .pipeline.artifacts import load_abi, load_contract, load_storage, load_synthesis
+from .pipeline.artifacts import (
+    load_abi,
+    load_contract,
+    load_storage,
+    load_synthesis,
+    validate_manifest,
+)
 from .pipeline.decompile import decompile as run_decompile
 from .synthesis.pseudocode import render_contract
 from .validation.coverage import compute_coverage
+from .validation.structural import validate_structure
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -36,6 +44,9 @@ def decompile_command(
     resume: bool = typer.Option(
         False, "--resume", help="Reuse valid saved deterministic and AI artifacts."
     ),
+    backend: str | None = typer.Option(
+        None, "--backend", help="Require auto, local, docker, or builtin analysis."
+    ),
 ) -> None:
     """Decompile raw bytecode, a .hex file, or an address."""
     try:
@@ -47,8 +58,9 @@ def decompile_command(
             block=block,
             use_ai=not no_ai,
             resume=resume,
+            backend=backend,
         )
-    except DecompilerError as exc:
+    except (DecompilerError, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(result.run_dir)
@@ -58,11 +70,14 @@ def decompile_command(
 def analyze_command(
     target: str = typer.Argument(..., metavar="TARGET"),
     output_dir: Path | None = typer.Option(None, "--output-dir", "-o"),
+    backend: str | None = typer.Option(
+        None, "--backend", help="Require auto, local, docker, or builtin analysis."
+    ),
 ) -> None:
     """Run the deterministic analysis checkpoint."""
     try:
-        result = run_decompile(target, output_dir=output_dir, use_ai=False)
-    except DecompilerError as exc:
+        result = run_decompile(target, output_dir=output_dir, use_ai=False, backend=backend)
+    except (DecompilerError, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(result.run_dir)
@@ -92,7 +107,7 @@ def doctor() -> None:
     local_ready = found or (script.is_file() and shutil.which("souffle") and functors.is_file())
     typer.echo(f"gigahorse_pin: {pin}")
     typer.echo(f"gigahorse_local: {'ok' if local_ready else 'not ready'}")
-    docker_ready = "@sha256:" in config.gigahorse.image
+    docker_ready = bool(re.search(r"@sha256:[0-9a-fA-F]{64}$", config.gigahorse.image))
     typer.echo(f"gigahorse_docker: {'configured' if docker_ready else 'not configured'}")
 
 
@@ -103,9 +118,10 @@ def explain(
 ) -> None:
     """Show one function's canonical evidence and inferred facts."""
     try:
+        validate_manifest(run_dir)
         contract = load_contract(run_dir)
         function = next(item for item in contract.functions if item.selector == selector.lower())
-    except (StopIteration, OSError, ValueError, json.JSONDecodeError) as exc:
+    except (DecompilerError, StopIteration, OSError, ValueError, json.JSONDecodeError) as exc:
         typer.echo(f"error: selector not found or invalid run: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(json.dumps(function.model_dump(mode="json"), indent=2))
@@ -118,6 +134,7 @@ def render(
 ) -> None:
     """Re-render a saved run without rerunning analysis or AI."""
     try:
+        validate_manifest(run_dir)
         contract = load_contract(run_dir)
         abi = load_abi(run_dir)
         storage = load_storage(run_dir)
@@ -131,7 +148,7 @@ def render(
         )
         path = run_dir / "output" / ("decompiled.annotated.sol" if annotated else "decompiled.sol")
         path.write_text(output, encoding="utf-8")
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (DecompilerError, OSError, ValueError, json.JSONDecodeError) as exc:
         typer.echo(f"error: invalid run: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(path)
@@ -141,13 +158,15 @@ def render(
 def validate(run_dir: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
     """Validate saved structured synthesis coverage against canonical IR."""
     try:
+        validate_manifest(run_dir)
         contract = load_contract(run_dir)
-        coverage = compute_coverage(contract, load_synthesis(run_dir) or None)
+        validate_structure(contract)
+        coverage = compute_coverage(contract)
         path = run_dir / "output" / "validation.json"
         path.write_text(
             json.dumps(coverage.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8"
         )
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (DecompilerError, OSError, ValueError, json.JSONDecodeError) as exc:
         typer.echo(f"error: invalid run: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(json.dumps(coverage.model_dump(mode="json"), indent=2))

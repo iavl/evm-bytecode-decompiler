@@ -59,6 +59,9 @@ def normalize_bytecode(
         bytecode_size=len(code),
         metadata_trailer=trailer,
     )
+    # Keep the historical metadata-stripped view for callers that explicitly
+    # request it. The pipeline itself always analyzes ``code`` so a heuristic
+    # trailer can never remove executable bytes.
     analysis_code = code[: trailer.offset] if trailer else code
     return NormalizedBytecode(code=code, analysis_code=analysis_code, metadata=metadata)
 

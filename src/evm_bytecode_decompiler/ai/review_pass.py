@@ -23,9 +23,12 @@ async def run_reviews(
     provider: AIProvider,
     max_concurrency: int = 4,
     temperature: float = 0.0,
+    max_prompt_bytes: int = 128 * 1024,
 ) -> ReviewPassResult:
     if max_concurrency < 1:
         raise ValueError("max_concurrency must be positive")
+    if max_prompt_bytes < 1:
+        raise ValueError("max_prompt_bytes must be positive")
     result = ReviewPassResult()
     semaphore = asyncio.Semaphore(max_concurrency)
     system = load_prompt("review_function.v1.md")
@@ -42,11 +45,17 @@ async def run_reviews(
             "function_ir": function.model_dump(mode="json"),
             "pseudo_function": pseudo.model_dump(mode="json"),
         }
+        prompt = json.dumps(context, sort_keys=True, indent=2)
+        if len(prompt.encode("utf-8")) > max_prompt_bytes:
+            result.rejected[function.id] = (
+                f"review prompt exceeds {max_prompt_bytes} bytes; function was not truncated"
+            )
+            return
         try:
             async with semaphore:
                 review = await provider.generate_structured(
                     system=system,
-                    prompt=json.dumps(context, sort_keys=True, indent=2),
+                    prompt=prompt,
                     schema=ReviewResult,
                     temperature=temperature,
                 )

@@ -5,7 +5,8 @@ Gigahorse toolchain.
 
 The pipeline keeps deterministic bytecode facts separate from inferred names
 and semantics. Every generated Solidity-like file is **reconstructed,
-unverified pseudocode**, not recovered source code.
+unverified pseudocode**, not recovered source code. AI can annotate names and
+explanations; it cannot add or rewrite deterministic operations.
 
 ## Quick start
 
@@ -22,7 +23,7 @@ run/
 ├── input/             # exact runtime and analysis bytecode
 ├── gigahorse/         # invocation, results, and normalized facts
 ├── ir/                # versioned canonical evidence IR
-├── semantics/         # optional AI annotations and synthesis
+├── semantics/         # optional AI annotations and validated candidates
 ├── output/            # pseudocode, ABI, storage, evidence map, report
 ├── logs/
 └── run.json
@@ -58,11 +59,16 @@ export OPENAI_MODEL=...
 uv run evm-bytecode-decompiler decompile ./contract.hex
 ```
 
-Use `--no-ai` for deterministic-only output. The AI path uses versioned
-structured prompts, bounded concurrency, evidence validation, one repair pass,
-and a separate review pass. Provider failures fall back to deterministic
-pseudocode; they do not mutate canonical IR. AI cache entries are keyed by
-canonical input, prompt version, model, and schema version.
+Use `--no-ai` for deterministic-only output. AI annotations are optional
+proposals for names and explanations; the deterministic IR always owns the
+rendered operations. Provider failures fall back to deterministic pseudocode;
+they do not mutate canonical IR. Requests larger than the configured
+`max_prompt_bytes` limit are skipped without truncation.
+Cache keys include the canonical request, provider endpoint, model, generation
+settings, prompt hash, and response schema hash.
+
+Use `--backend builtin` for a deliberately limited offline lifter, or require
+`local`/`docker` when a full pinned toolchain is part of the run contract.
 
 ## Gigahorse
 
@@ -80,9 +86,10 @@ uv run evm-bytecode-decompiler doctor
 ```
 
 Local Gigahorse execution additionally needs Soufflé and the compiled native
-functors under `vendor/gigahorse-toolchain/souffle-addon/`. Without those
-dependencies, the CLI reports the pinned revision and uses the limited,
-explicitly labeled builtin lifter.
+functors under `vendor/gigahorse-toolchain/souffle-addon/`. The default
+`backend = "auto"` selects a configured local or digest-pinned Docker runner
+and otherwise records a partial built-in lifter result. Set `backend =
+"local"`, `"docker"`, or `"builtin"` to require a specific backend.
 
 For a reproducible container, build `docker/gigahorse.Dockerfile` with an
 immutable `BASE_IMAGE` digest and the full Gigahorse commit:
@@ -95,7 +102,8 @@ docker build \
 ```
 
 The Docker runner rejects mutable image tags and disables network access for
-the analysis container.
+the analysis container. Runtime metadata is retained as a candidate trailer;
+the full runtime bytes are sent to the analysis backend.
 
 ## Inspecting a run
 
@@ -114,6 +122,11 @@ uv run evm-bytecode-decompiler cache stats
 uv run evm-bytecode-decompiler cache clear
 ```
 
+Runs are published only after all structured artifacts pass validation. The
+manifest records the input, backend/toolchain identity, AI configuration
+fingerprint, and hashes for every artifact; `--resume` reuses a run only when
+that identity and every hash still match.
+
 ## Benchmark
 
 `benchmarks/manifest.json` contains 20 source fixtures covering storage,
@@ -130,7 +143,8 @@ uv run evm-bytecode-decompiler benchmark report --output-dir runs/benchmark
 ```
 
 Use a compiler matching each fixture pragma; `--strict` fails on compilation
-errors or deterministic fixture regressions.
+errors or deterministic fixture regressions against the expected facts in the
+manifest.
 
 ## Development
 

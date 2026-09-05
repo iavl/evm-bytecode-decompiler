@@ -4,17 +4,38 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..cache.keys import cache_key
+from ..cache.keys import cache_key, schema_hash
 from ..cache.store import CacheStore
 from ..errors import AIProviderError, AIResponseValidationError
 from ..inference.abi import InferredFunction
 from ..inference.storage import StorageLayoutEntry
 from ..models.ir import FunctionIR
 from .prompts import load_prompt, prompt_hash
-from .provider import AIProvider
+from .provider import AIProvider, provider_identity
 from .schemas import FunctionSemanticAnnotation
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+RESERVED_IDENTIFIERS = {
+    "break",
+    "case",
+    "contract",
+    "else",
+    "external",
+    "false",
+    "function",
+    "if",
+    "import",
+    "internal",
+    "mapping",
+    "new",
+    "private",
+    "public",
+    "return",
+    "struct",
+    "true",
+    "uint256",
+    "while",
+}
 
 
 @dataclass
@@ -44,8 +65,10 @@ def function_slice(
             evidence.update(item.fact_id for item in statement.evidence if item.fact_id)
     for access in function.storage_reads + function.storage_writes:
         evidence.add(access.id)
+        evidence.update(item.fact_id for item in access.evidence if item.fact_id)
     for fact in function.external_calls + function.events + function.reverts:
         evidence.add(fact.id)
+        evidence.update(item.fact_id for item in fact.evidence if item.fact_id)
     return {
         "function": function.model_dump(mode="json"),
         "selector": function.selector,
@@ -99,6 +122,18 @@ def validate_annotation(
         raise AIResponseValidationError(
             f"annotation references unknown evidence: {unknown_evidence}"
         )
+    proposal_evidence = {
+        reference
+        for proposal in annotation.proposals.values()
+        for reference in proposal.evidence_refs
+    }
+    unknown_proposal_evidence = sorted(proposal_evidence - known_evidence)
+    if unknown_proposal_evidence:
+        raise AIResponseValidationError(
+            f"proposal references unknown evidence: {unknown_proposal_evidence}"
+        )
+    if any(not proposal.evidence_refs for proposal in annotation.proposals.values()):
+        raise AIResponseValidationError("semantic proposals must cite evidence")
     known_arguments = {item.id for item in function.arguments}
     unknown_arguments = sorted(set(annotation.argument_names) - known_arguments)
     unknown_arguments.extend(sorted(set(annotation.argument_types) - known_arguments))
@@ -110,6 +145,9 @@ def validate_annotation(
     unknown_storage = sorted(set(annotation.storage_labels) - known_storage)
     if unknown_storage:
         raise AIResponseValidationError(f"annotation references unknown storage: {unknown_storage}")
+    names = list(annotation.argument_names.values()) + list(annotation.storage_labels.values())
+    if any(not IDENTIFIER_RE.fullmatch(name) or name in RESERVED_IDENTIFIERS for name in names):
+        raise AIResponseValidationError("annotation contains an invalid identifier")
     known_constants = _known_constants(function)
     unsupported = [
         value
@@ -118,13 +156,17 @@ def validate_annotation(
     ]
     if unsupported:
         raise AIResponseValidationError(f"annotation claims unsupported constants: {unsupported}")
-    if annotation.proposed_name and not IDENTIFIER_RE.fullmatch(annotation.proposed_name):
+    if annotation.proposed_name and (
+        not IDENTIFIER_RE.fullmatch(annotation.proposed_name)
+        or annotation.proposed_name in RESERVED_IDENTIFIERS
+    ):
         raise AIResponseValidationError("proposed function name is not a Solidity identifier")
+    if any(
+        not IDENTIFIER_RE.fullmatch(proposal.value) or proposal.value in RESERVED_IDENTIFIERS
+        for proposal in annotation.proposals.values()
+    ):
+        raise AIResponseValidationError("semantic proposal contains an invalid identifier")
     return annotation
-
-
-def _provider_model(provider: AIProvider) -> str:
-    return getattr(provider, "model", "unknown")
 
 
 def _mark_cache_hit(provider: AIProvider) -> None:
@@ -142,9 +184,12 @@ async def run_function_semantics(
     cache: CacheStore | None = None,
     max_concurrency: int = 4,
     temperature: float = 0.0,
+    max_prompt_bytes: int = 128 * 1024,
 ) -> SemanticPassResult:
     if max_concurrency < 1:
         raise ValueError("max_concurrency must be positive")
+    if max_prompt_bytes < 1:
+        raise ValueError("max_prompt_bytes must be positive")
     result = SemanticPassResult()
     semaphore = asyncio.Semaphore(max_concurrency)
     system = load_prompt("function_semantics.v1.md")
@@ -153,13 +198,21 @@ async def run_function_semantics(
     async def one(function: FunctionIR) -> None:
         context = function_slice(function, abi=(abi_by_id or {}).get(function.id), storage=storage)
         key = cache_key(
-            function.model_dump(mode="json"),
+            {"context": context, "temperature": temperature},
             prompt_version=version,
-            model=_provider_model(provider),
+            model=provider_identity(provider),
             schema_version=1,
+            schema_hash=schema_hash(FunctionSemanticAnnotation),
+        )
+        canonical_key = cache_key(
+            {"function": function.model_dump(mode="json"), "temperature": temperature},
+            prompt_version=version,
+            model=provider_identity(provider),
+            schema_version=1,
+            schema_hash=schema_hash(FunctionSemanticAnnotation),
         )
         if cache:
-            cached = cache.get(key)
+            cached = cache.get(key) or cache.get(canonical_key)
             if cached is not None:
                 try:
                     annotation = validate_annotation(
@@ -173,6 +226,11 @@ async def run_function_semantics(
                     _mark_cache_hit(provider)
                     return
         prompt = json.dumps(context, sort_keys=True, indent=2)
+        if len(prompt.encode("utf-8")) > max_prompt_bytes:
+            result.rejected[function.id] = (
+                f"semantic prompt exceeds {max_prompt_bytes} bytes; function was not truncated"
+            )
+            return
         try:
             async with semaphore:
                 annotation = await provider.generate_structured(
@@ -188,6 +246,7 @@ async def run_function_semantics(
         result.annotations[function.id] = annotation
         if cache:
             cache.put(key, annotation.model_dump(mode="json"))
+            cache.put(canonical_key, annotation.model_dump(mode="json"))
 
     await asyncio.gather(*(one(function) for function in functions))
     return result

@@ -56,6 +56,7 @@ async def _run(
     cache: CacheStore | None,
     max_concurrency: int,
     temperature: float,
+    max_prompt_bytes: int,
 ) -> AIPipelineResult:
     result = AIPipelineResult()
     abi_by_id = {item.function_id: item for item in abi.functions}
@@ -67,6 +68,7 @@ async def _run(
         cache=cache,
         max_concurrency=max_concurrency,
         temperature=temperature,
+        max_prompt_bytes=max_prompt_bytes,
     )
     result.annotations = semantic.annotations
     result.warnings.extend(
@@ -86,6 +88,7 @@ async def _run(
         provider=provider,
         cache=cache,
         temperature=temperature,
+        max_prompt_bytes=max_prompt_bytes,
     )
     if result.reconciliation.rejected:
         result.warnings.append(
@@ -103,6 +106,7 @@ async def _run(
         cache=cache,
         max_concurrency=max_concurrency,
         temperature=temperature,
+        max_prompt_bytes=max_prompt_bytes,
     )
     result.warnings.extend(
         f"synthesis rejected for {function_id}: {message}"
@@ -120,6 +124,7 @@ async def _run(
         provider=provider,
         max_concurrency=max_concurrency,
         temperature=temperature,
+        max_prompt_bytes=max_prompt_bytes,
     )
     result.warnings.extend(
         f"review unavailable for {function_id}: {message}"
@@ -129,7 +134,16 @@ async def _run(
     for function_id, pseudo in result.synthesis.functions.items():
         review = result.review.reviews.get(function_id)
         if review is None or review.severity != "fail":
-            result.accepted[function_id] = pseudo
+            # Keep only the proposed name/arguments as an annotation view. The
+            # deterministic renderer owns the function body and side effects.
+            result.accepted[function_id] = pseudo.model_copy(
+                update={
+                    "body": [],
+                    "unresolved": [
+                        "AI body reconstruction is intentionally ignored; see canonical IR"
+                    ],
+                }
+            )
     # A transport failure in the optional reviewer does not destroy a valid,
     # deterministically checked synthesis; it remains visibly warned in the report.
     result.stages["validation"] = {
@@ -153,6 +167,7 @@ def run_ai_pipeline(
     cache: CacheStore | None,
     max_concurrency: int,
     temperature: float = 0.0,
+    max_prompt_bytes: int = 128 * 1024,
 ) -> AIPipelineResult:
     return asyncio.run(
         _run(
@@ -163,5 +178,6 @@ def run_ai_pipeline(
             cache=cache,
             max_concurrency=max_concurrency,
             temperature=temperature,
+            max_prompt_bytes=max_prompt_bytes,
         )
     )

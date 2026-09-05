@@ -47,6 +47,17 @@ class AIProvider(Protocol):
     ) -> ModelT: ...
 
 
+def provider_identity(provider: AIProvider) -> str:
+    """Stable non-secret identity used to isolate cached requests."""
+    return "|".join(
+        (
+            getattr(provider, "provider_name", "unknown"),
+            getattr(provider, "model", "unknown"),
+            getattr(provider, "endpoint", "unknown"),
+        )
+    )
+
+
 class OpenAICompatibleProvider:
     provider_name = "openai-compatible"
 
