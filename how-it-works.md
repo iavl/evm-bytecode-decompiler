@@ -1,13 +1,10 @@
 # How It Works
 
-## 1. What the project is
+`evm-bytecode-decompiler` is an evidence-grounded semantic decompiler for EVM runtime bytecode. It separates deterministic program analysis from semantic interpretation so that inferred meaning never overwrites bytecode-derived facts.
 
-`evm-bytecode-decompiler` is an evidence-grounded EVM semantic decompiler. It
-turns runtime bytecode into deterministic facts, a canonical IR, and readable
-Solidity-like pseudocode. It is not a Solidity source recovery tool: every
-generated source-like file is reconstructed and unverified.
+The generated Solidity-like output is reconstructed, unverified pseudocode rather than recovered source code.
 
-## 2. High-level architecture
+## High-level architecture
 
 ```mermaid
 flowchart TD
@@ -18,117 +15,165 @@ flowchart TD
     D --> F[Normalized relations]
     E --> F
     F --> G[Canonical Contract IR]
-    G --> H[Deterministic ABI/storage inference]
-    H --> I[Agent context]
+    G --> H[Deterministic ABI and storage inference]
+    H --> I[Bounded agent context]
     I --> J[Codex / Agent Skill]
     J --> K[Semantic annotations]
     K --> L[Deterministic annotation validation]
-    L --> M[Annotated pseudocode + report]
+    L --> M[Annotated pseudocode and report]
 ```
 
-The Python package owns the left side and the validation/rendering boundary.
-The active Codex agent owns semantic interpretation; no model API is nested in
-the CLI.
+The important boundary is between the canonical IR and the semantic annotation layer. Bytecode-derived facts remain authoritative. The AI can explain and label those facts, but it cannot rewrite them.
 
-## 3. Input normalization
+## 1. Inputs
 
-The input layer accepts raw hexadecimal runtime bytecode, a `.hex` file, or a
-deployed contract address. Address analysis needs an RPC endpoint and records
-the chain, target, and block in the run metadata. An explicitly requested
-historical block is passed to `eth_getCode` unchanged; the tool never replaces
-it with `latest`.
+The tool accepts three main kinds of input:
 
-Normalized runtime bytes are written to `input/runtime.hex` and
-`input/analysis.hex` before analysis. Metadata trailers are recorded as
-candidates, but the configured analysis input remains explicit and auditable.
+- raw EVM runtime bytecode;
+- a `.hex` file containing runtime bytecode;
+- a deployed contract address.
 
-## 4. Gigahorse and the built-in fallback
+Address-based analysis requires an RPC endpoint. When a historical block is explicitly requested, the tool uses that block for `eth_getCode` and must not silently replace it with `latest`.
 
-`vendor/gigahorse-toolchain` is the pinned full Gigahorse submodule and its
-recursive `souffle-addon` dependency. A ready local installation or a
-digest-pinned Docker runner supplies the richer relation workspace.
+The input layer records normalized runtime bytes and metadata before further analysis.
 
-`BuiltinRunner` is not Gigahorse. It is a limited deterministic EVM lifter used
-when a full toolchain is unavailable. Runs record `backend` and
-`completeness`; fallback runs are `builtin` and `partial`, and the Skill must
-lower confidence accordingly.
+## 2. Gigahorse and the built-in fallback
 
-## 5. Relations and canonical IR
-
-Gigahorse relation files or built-in facts are normalized into versioned
-`ContractIR`. The IR represents functions, blocks, statements, control-flow
-edges, constants, storage accesses, calls, events, reverts, and evidence refs.
-It is the trust boundary: agent annotations cannot rewrite `ir/contract.json`
-or deterministic output.
-
-## 6. Deterministic inference
-
-The deterministic stages infer ABI candidates, argument counts, storage layout
-candidates, proxy signals, evidence maps, and structural validation results.
-These are derived evidence, not absolute source truth; origins and confidence
-remain visible where the model supports them.
-
-## 7. Agent context and progressive disclosure
-
-The CLI does not dump raw relation workspaces into an agent prompt. `context
-RUN_DIR` returns bounded contract-level JSON containing the run fingerprint,
-input, backend/completeness, proxy result, ABI/storage summaries, function
-inventory, selector mapping, counts, unresolved IDs, and truncation metadata.
-
-`context RUN_DIR --selector SELECTOR` adds one function's bounded blocks,
-statements, calls, storage, events, reverts, returns, and evidence IDs. Large
-functions are truncated at block boundaries and report what was omitted.
-
-## 8. What the Skill/AI does
-
-The active Codex/AI performs the semantic reasoning directly. It can:
-
-- propose function and argument names;
-- label storage locations;
-- suggest defensible argument types;
-- summarize behavior and contract roles;
-- recognize patterns;
-- reconcile labels across functions;
-- record confidence and uncertainty.
-
-The intended reasoning order is contract overview, function semantics,
-cross-function reconciliation, storage/role consistency, proposal, validation,
-self-review, and final rendering.
-
-## 9. What the Skill/AI cannot do
-
-The agent cannot modify canonical facts, add unsupported operations, remove
-unknown operations, change calls or call types, rewrite constants/control flow,
-invent functions, or claim exact source recovery. If the evidence is
-insufficient, it must omit the claim or mark uncertainty.
-
-Proxy detection must be surfaced rather than silently treating proxy runtime as
-implementation logic. A partial built-in run is not described as Gigahorse.
-
-## 10. Annotation validation
-
-An annotation proposal is strict Pydantic JSON with a schema version and the
-deterministic run fingerprint. The validator checks unknown fields, function
-IDs, selector matches, argument/storage IDs, evidence references, identifiers,
-confidence bounds, and run identity. It rejects the whole proposal on a
-schema or evidence mismatch.
-
-`agent apply` writes normalized `proposal.json`, `annotations.json`, and a
-hash-bound `agent/manifest.json`. It never edits canonical artifacts. The
-renderer owns the body and side effects; annotations affect only names,
-labels, comments, and uncertainty text.
-
-## 11. Output artifacts
+The repository supports the full Gigahorse toolchain through the Git submodule at:
 
 ```text
-RUN_DIR/
-├── input/                 # normalized bytes and input metadata
-├── gigahorse/             # invocation, results, and facts
-├── ir/                    # canonical ContractIR
-├── output/                # deterministic pseudocode, ABI, storage, report
+vendor/gigahorse-toolchain
+```
+
+When the full toolchain is available, it is the preferred backend because it can recover richer control-flow and data-flow relations from EVM bytecode.
+
+The repository also contains a `BuiltinRunner`. This is **not a miniature version of Gigahorse**. It is a deliberately limited deterministic EVM lifter used when the full Gigahorse environment is unavailable.
+
+A run therefore records both its backend and its completeness. A result produced by the built-in lifter should normally be treated as partial evidence and interpreted with lower confidence.
+
+## 3. Relations and canonical IR
+
+Raw analyzer output is not exposed directly as the project's primary internal contract. Instead, relevant analyzer facts are normalized into a versioned canonical representation.
+
+The canonical `ContractIR` is the trust boundary between bytecode analysis and semantic interpretation. It represents mechanically recovered facts such as functions, operations, storage activity, calls, constants, control-flow information, and evidence references.
+
+The canonical IR must never be rewritten to match an AI interpretation.
+
+## 4. Deterministic inference
+
+After the canonical IR is built, the tool performs deterministic or bounded inference such as:
+
+- function selector and ABI-related inference;
+- storage-layout inference;
+- proxy detection;
+- evidence-map construction;
+- structural validation;
+- coverage reporting.
+
+These outputs remain part of the deterministic run.
+
+Where a value is inferred rather than directly proven, the representation should preserve that distinction.
+
+## 5. Agent context and progressive disclosure
+
+Large contracts can produce more evidence than an agent should load at once. The CLI therefore exposes a bounded agent-context view.
+
+The contract-level context contains a compact inventory of functions, selectors, storage, backend/completeness metadata, proxy information, and high-level evidence.
+
+The agent can then inspect individual functions incrementally to retrieve details such as:
+
+- storage reads and writes;
+- calls and call types;
+- branches and revert conditions;
+- events;
+- constants;
+- calldata usage;
+- return behavior;
+- unresolved operations;
+- evidence references.
+
+This progressive-disclosure model keeps the agent context bounded while preserving access to deeper evidence when needed.
+
+## 6. What the Agent Skill does
+
+The Agent Skill does not run another model inside the Python package. The active Codex or compatible AI is itself the reasoning engine.
+
+The Skill guides the agent through a repeatable semantic workflow:
+
+1. run deterministic analysis;
+2. inspect backend and completeness;
+3. read contract-level context;
+4. inspect important functions;
+5. infer names, roles, storage labels, and behavior;
+6. reconcile those interpretations across the contract;
+7. preserve uncertainty;
+8. produce a structured annotation proposal;
+9. submit the proposal to the deterministic validator;
+10. render validated annotated pseudocode.
+
+Typical agent-level semantic work includes:
+
+- proposing function names;
+- naming arguments;
+- labeling storage slots;
+- summarizing function behavior;
+- recognizing common contract patterns;
+- inferring roles or relationships between functions;
+- documenting uncertainty.
+
+## 7. What the AI cannot do
+
+Semantic output is advisory.
+
+The agent must not:
+
+- change canonical storage reads or writes;
+- insert or remove external calls;
+- change call types;
+- rewrite constants;
+- invent control-flow paths;
+- add unsupported functions;
+- suppress unresolved operations;
+- claim that reconstructed pseudocode is the original Solidity source.
+
+When the evidence is insufficient, the correct output is uncertainty rather than a fabricated explanation.
+
+## 8. Annotation validation
+
+Agent output is represented as a structured annotation proposal rather than arbitrary rewritten Solidity.
+
+The validator checks properties such as:
+
+- schema version;
+- deterministic run fingerprint;
+- function IDs;
+- selectors;
+- evidence references;
+- storage references;
+- confidence ranges;
+- unknown fields.
+
+Invalid proposals fail closed.
+
+A valid semantic overlay is bound to the deterministic run it was created from, so annotations from one bytecode analysis cannot accidentally be applied to another.
+
+## 9. Output artifacts
+
+A run separates deterministic and agent-generated artifacts.
+
+```text
+run/
+├── input/
+├── gigahorse/
+├── ir/
+├── output/
+│   ├── decompiled.sol
+│   ├── abi.inferred.json
+│   ├── storage.layout.json
+│   └── evidence-map.json
 ├── logs/
-├── run.json               # deterministic fingerprint and hashes
-└── agent/                 # optional semantic overlay
+├── run.json
+└── agent/
     ├── proposal.json
     ├── annotations.json
     ├── manifest.json
@@ -136,64 +181,42 @@ RUN_DIR/
     └── report.md
 ```
 
-`output/decompiled.sol` is canonical. `agent/decompiled.annotated.sol` is a
-separate, advisory view.
+`output/` contains deterministic products.
 
-## 12. Why no OpenAI API key is required
+`agent/` contains semantic overlays and human-oriented annotated output.
 
-The workflow is:
+Applying annotations must not mutate the canonical IR or deterministic outputs.
 
-```text
-Codex -> Skill -> local deterministic CLI
-```
-
-It is not:
-
-```text
-CLI -> OpenAI API
-```
-
-The normal Codex Skill path requires no `OPENAI_API_KEY` or `OPENAI_MODEL`.
-Codex credentials are not passed into the Python package, and the package does
-not call an external provider.
-
-## 13. Trust model
+## 10. Trust model
 
 | Layer | Authority | Examples |
 |---|---|---|
 | Runtime bytecode | Highest | Original runtime bytes |
-| Gigahorse/builtin facts | Deterministic evidence | CFG, storage and call facts |
-| Canonical IR | Authoritative internal representation | Functions, operations, refs |
-| Deterministic inference | Derived evidence | ABI/storage candidates, proxy signals |
+| Gigahorse/built-in facts | Deterministic evidence | CFG, storage and call facts |
+| Canonical IR | Authoritative internal representation | Functions, operations, evidence refs |
+| Deterministic inference | Derived evidence | ABI/storage candidates, proxy detection |
 | Agent annotations | Advisory semantics | Names, labels, summaries, roles |
-| Annotated pseudocode | Human-readable reconstruction | Not source code |
+| Annotated pseudocode | Human-readable reconstruction | Not recovered source code |
 
-When an annotation conflicts with canonical evidence, canonical evidence wins.
+If an annotation conflicts with canonical evidence, canonical evidence wins.
 
-## 14. Example end-to-end workflow
+## 11. Limitations
 
-```bash
-RUN_DIR="$(uv run evm-bytecode-decompiler decompile ./contract.hex \
-  --backend builtin)"
-uv run evm-bytecode-decompiler context "$RUN_DIR"
-uv run evm-bytecode-decompiler context "$RUN_DIR" --selector 0xa9059cbb
-# The active agent writes proposal.json using the returned fingerprint and IDs.
-uv run evm-bytecode-decompiler agent validate "$RUN_DIR" proposal.json
-uv run evm-bytecode-decompiler agent apply "$RUN_DIR" proposal.json
-uv run evm-bytecode-decompiler agent render "$RUN_DIR"
-```
+Decompilation is inherently incomplete.
 
-The final report identifies the backend, completeness, proxy status, canonical
-output, semantic overlay, and remaining uncertainty.
+Results can be degraded by:
 
-## 15. Limitations
+- heavily optimized bytecode;
+- obfuscation;
+- dynamic jumps;
+- assembly-heavy contracts;
+- proxy contracts whose implementation bytecode is not analyzed;
+- incomplete analyzer output;
+- the limited built-in fallback;
+- selector collisions or ambiguity;
+- missing runtime context;
+- compiler transformations that erase source-level intent.
 
-Results can degrade with optimized or obfuscated bytecode, dynamic jumps,
-assembly-heavy contracts, proxies without implementation bytecode, incomplete
-relation workspaces, the limited built-in fallback, selector ambiguity,
-missing runtime context, and compiler transformations that erase source-level
-intent. Exact original Solidity recovery is not guaranteed.
+Even with full Gigahorse evidence and strong semantic reasoning, exact original Solidity source recovery is not guaranteed.
 
-The tool also does not fetch storage values, trace transactions, perform full
-symbolic execution, generate exploits, classify vulnerabilities, or provide a
-web service.
+The goal is instead to produce an auditable reconstruction whose semantic claims remain tied to bytecode-derived evidence.
