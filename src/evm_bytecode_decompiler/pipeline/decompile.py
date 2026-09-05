@@ -1,17 +1,12 @@
 import hashlib
 import json
-import os
 import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, cast
 
-from ..ai.pipeline import AIPipelineResult, run_ai_pipeline
-from ..ai.prompts import prompt_hash
-from ..ai.provider import AIProvider, provider_from_environment
-from ..cache.store import CacheStore
 from ..config import AppConfig, load_config
-from ..errors import AIProviderError, ArtifactError, BackendUnavailableError, GigahorseAnalysisError
+from ..errors import ArtifactError, BackendUnavailableError, GigahorseAnalysisError
 from ..gigahorse.docker import DockerGigahorseRunner
 from ..gigahorse.relations import load_relations
 from ..gigahorse.runner import BuiltinRunner, GigahorseResult, LocalGigahorseRunner
@@ -27,13 +22,7 @@ from ..synthesis.pseudocode import render_contract, render_evidence_map, render_
 from ..validation.coverage import ValidationCoverage, compute_coverage
 from ..validation.report import render_report
 from ..validation.structural import validate_structure
-from .artifacts import (
-    artifact_hash,
-    load_abi,
-    load_contract,
-    load_storage,
-    validate_manifest,
-)
+from .artifacts import artifact_hash, load_abi, load_contract, load_storage, validate_manifest
 from .context import PipelineContext
 from .stages import Stage
 
@@ -46,10 +35,9 @@ class DecompileResult:
     storage: list[StorageLayoutEntry]
     coverage: ValidationCoverage
     gigahorse: GigahorseResult
-    ai: AIPipelineResult | None = None
 
 
-RUN_SCHEMA_VERSION = 2
+RUN_SCHEMA_VERSION = 3
 
 
 def _client_path(config: AppConfig) -> Path:
@@ -87,8 +75,6 @@ def _fingerprint(
     normalized: NormalizedBytecode,
     config: AppConfig,
     *,
-    use_ai: bool,
-    provider: AIProvider | None,
     selected_backend: str | None = None,
 ) -> str:
     metadata = normalized.metadata.model_dump(mode="json")
@@ -109,29 +95,19 @@ def _fingerprint(
             "toolchain_dir": str(config.gigahorse.toolchain_dir),
             "client_sha256": client_digest,
         },
-        "ai": {
-            "requested": use_ai,
-            "provider": getattr(provider, "provider_name", config.ai.provider),
-            "model": getattr(provider, "model", os.environ.get("OPENAI_MODEL", config.ai.model)),
-            "endpoint": getattr(
-                provider, "endpoint", os.environ.get("OPENAI_BASE_URL", config.ai.endpoint)
-            ),
-            "temperature": config.ai.temperature,
-            "max_prompt_bytes": config.ai.max_prompt_bytes,
-            "available": provider is not None or bool(os.environ.get("OPENAI_API_KEY")),
-            "prompt_hashes": {
-                name: prompt_hash(name)
-                for name in (
-                    "function_semantics.v1.md",
-                    "contract_reconcile.v1.md",
-                    "synthesize_function.v1.md",
-                    "review_function.v1.md",
-                )
-            },
-        },
     }
     material = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(material).hexdigest()
+
+
+def _runner_name(runner: object) -> str:
+    if isinstance(runner, DockerGigahorseRunner):
+        return "docker"
+    if isinstance(runner, LocalGigahorseRunner):
+        return "local"
+    if isinstance(runner, BuiltinRunner):
+        return "builtin"
+    return runner.__class__.__name__.lower()
 
 
 def _resume_result(run_dir: Path, fingerprint: str) -> DecompileResult | None:
@@ -186,9 +162,7 @@ def _resume_result(run_dir: Path, fingerprint: str) -> DecompileResult | None:
         return None
 
 
-def _runner(
-    config: AppConfig,
-) -> LocalGigahorseRunner | DockerGigahorseRunner | BuiltinRunner:
+def _runner(config: AppConfig) -> LocalGigahorseRunner | DockerGigahorseRunner | BuiltinRunner:
     gh = config.gigahorse
     client = _client_path(config)
     backend = gh.backend.lower()
@@ -239,11 +213,12 @@ def decompile(
     chain: str | None = None,
     block: int | str | None = None,
     config: AppConfig | None = None,
-    use_ai: bool = True,
-    provider: AIProvider | None = None,
+    use_ai: bool | None = None,
     resume: bool = False,
     backend: str | None = None,
 ) -> DecompileResult:
+    """Run only deterministic analysis; ``use_ai`` remains a deprecated no-op."""
+    del use_ai
     app_config = config or load_config()
     if backend is not None:
         if backend not in {"auto", "local", "docker", "builtin"}:
@@ -263,9 +238,7 @@ def decompile(
     identity = _fingerprint(
         normalized,
         app_config,
-        use_ai=use_ai,
-        provider=provider,
-        selected_backend=selected_runner.__class__.__name__,
+        selected_backend=_runner_name(selected_runner),
     )
     run_dir = output_dir or app_config.output.root / (
         f"{normalized.metadata.bytecode_sha256[:16]}-{identity[:12]}"
@@ -323,11 +296,7 @@ def decompile(
             "completeness": result.completeness,
         },
     )
-    context.mark(
-        Stage.GIGAHORSE,
-        result.effective_status,
-        duration_ms=result.duration_ms,
-    )
+    context.mark(Stage.GIGAHORSE, result.effective_status, duration_ms=result.duration_ms)
     if result.status in {"timeout", "error"}:
         message = "; ".join(result.errors) or "Gigahorse analysis failed"
         error = GigahorseAnalysisError(message)
@@ -379,81 +348,20 @@ def decompile(
         storage=len(storage),
     )
 
-    ai_result: AIPipelineResult | None = None
-    ai_warnings: list[str] = []
-    if use_ai:
-        active_provider = provider
-        if active_provider is None:
-            try:
-                active_provider = provider_from_environment(
-                    model=app_config.ai.model,
-                    endpoint=app_config.ai.endpoint,
-                    timeout=app_config.ai.timeout_seconds,
-                )
-            except AIProviderError as exc:
-                ai_warnings.append(str(exc))
-        if active_provider is None:
-            ai_warnings.append("AI provider is not configured; deterministic output was retained.")
-        else:
-            try:
-                ai_result = run_ai_pipeline(
-                    contract,
-                    abi,
-                    storage,
-                    provider=active_provider,
-                    cache=CacheStore(app_config.ai.cache_dir),
-                    max_concurrency=app_config.ai.max_concurrency,
-                    temperature=app_config.ai.temperature,
-                    max_prompt_bytes=app_config.ai.max_prompt_bytes,
-                )
-                ai_warnings.extend(ai_result.warnings)
-                context.stages.update(
-                    {
-                        name: details
-                        for name, details in ai_result.stages.items()
-                        if name != Stage.VALIDATION.value
-                    }
-                )
-            except (AIProviderError, ValueError, TypeError) as exc:
-                ai_warnings.append(f"AI pipeline failed; deterministic output was retained: {exc}")
-    if ai_result is None:
-        for stage in (
-            Stage.AI_FUNCTION_SEMANTICS,
-            Stage.AI_RECONCILIATION,
-            Stage.SYNTHESIS,
-        ):
-            context.mark(stage, "skipped", reason="--no-ai or provider unavailable")
-
     ir_dir = run_dir / "ir"
     _write_json(ir_dir / "contract.json", contract.model_dump(mode="json"))
     (ir_dir / "schema_version").write_text("2\n", encoding="ascii")
     output_dir_path = run_dir / "output"
     output_dir_path.mkdir(exist_ok=True)
-    pseudo_functions = ai_result.accepted if ai_result else None
-    solidity = render_contract(contract, abi, storage, pseudo_functions=pseudo_functions)
-    (output_dir_path / "decompiled.sol").write_text(solidity, encoding="utf-8")
-    (output_dir_path / "decompiled.annotated.sol").write_text(
-        render_contract(
-            contract,
-            abi,
-            storage,
-            pseudo_functions=pseudo_functions,
-            annotated=True,
-        ),
-        encoding="utf-8",
+    (output_dir_path / "decompiled.sol").write_text(
+        render_contract(contract, abi, storage), encoding="utf-8"
     )
     _write_json(output_dir_path / "abi.inferred.json", abi.model_dump(mode="json"))
     (output_dir_path / "storage.layout.json").write_text(
         render_storage_layout(storage), encoding="utf-8"
     )
     (output_dir_path / "evidence-map.json").write_text(
-        render_evidence_map(
-            contract,
-            abi,
-            annotations=ai_result.annotations if ai_result else None,
-            pseudo_functions=pseudo_functions,
-        ),
-        encoding="utf-8",
+        render_evidence_map(contract, abi), encoding="utf-8"
     )
 
     try:
@@ -461,23 +369,10 @@ def decompile(
     except Exception as exc:
         _mark_failed(run_dir, identity, exc)
         raise
-    warnings.extend(ai_warnings)
     coverage = compute_coverage(contract)
     context.mark(Stage.VALIDATION, "pass_with_warnings" if warnings else "pass", warnings=warnings)
     (output_dir_path / "report.md").write_text(
-        render_report(
-            normalized,
-            contract,
-            abi,
-            storage,
-            coverage,
-            result,
-            ai_usage=(
-                {"enabled": True, **ai_result.usage, "warnings": ai_warnings}
-                if ai_result
-                else {"enabled": False, "warnings": ai_warnings}
-            ),
-        ),
+        render_report(normalized, contract, abi, storage, coverage, result),
         encoding="utf-8",
     )
     context.mark(Stage.REPORT, "pass")
@@ -494,43 +389,6 @@ def decompile(
     (logs_dir / "pipeline.log").write_text(
         "".join(f"[{name}] {details['status']}\n" for name, details in context.stages.items()),
         encoding="utf-8",
-    )
-    semantics_dir = run_dir / "semantics"
-    _write_json(
-        semantics_dir / "storage.json",
-        {"storage": [item.model_dump(mode="json") for item in storage]},
-    )
-    if ai_result:
-        for function_id, annotation in ai_result.annotations.items():
-            _write_json(
-                semantics_dir / "functions" / f"{function_id}.json",
-                annotation.model_dump(mode="json"),
-            )
-        _write_json(
-            semantics_dir / "contract.json",
-            ai_result.reconciliation.semantics.model_dump(mode="json"),
-        )
-        _write_json(
-            semantics_dir / "synthesis.json",
-            {key: value.model_dump(mode="json") for key, value in ai_result.accepted.items()},
-        )
-        _write_json(
-            semantics_dir / "reviews.json",
-            {key: value.model_dump(mode="json") for key, value in ai_result.review.reviews.items()},
-        )
-        _write_json(semantics_dir / "ai_usage.json", {"enabled": True, **ai_result.usage})
-    else:
-        _write_json(
-            semantics_dir / "contract.json",
-            {"enabled": False, "reason": "AI provider unavailable or --no-ai"},
-        )
-        _write_json(semantics_dir / "ai_usage.json", {"enabled": False})
-        _write_json(semantics_dir / "synthesis.json", {})
-        _write_json(semantics_dir / "reviews.json", {})
-    ai_usage = (
-        {"enabled": True, **ai_result.usage, "warnings": ai_warnings}
-        if ai_result
-        else {"enabled": False, "warnings": ai_warnings}
     )
     artifacts = {
         str(path.relative_to(run_dir)): artifact_hash(path)
@@ -563,8 +421,7 @@ def decompile(
                 "commit": result.commit,
                 "completeness": result.completeness,
             },
-            "ai": ai_usage,
             "artifacts": artifacts,
         },
     )
-    return DecompileResult(run_dir, contract, abi, storage, coverage, result, ai_result)
+    return DecompileResult(run_dir, contract, abi, storage, coverage, result)

@@ -1,6 +1,5 @@
 import json
 from collections.abc import Iterable
-from typing import Any
 
 from ..gigahorse.runner import GigahorseResult
 from ..inference.abi import InferredABI
@@ -17,7 +16,6 @@ def render_report(
     storage: Iterable[StorageLayoutEntry],
     coverage: ValidationCoverage,
     gigahorse: GigahorseResult,
-    ai_usage: dict[str, Any] | None = None,
 ) -> str:
     storage_items = list(storage)
     function_names = [item.name for item in abi.functions]
@@ -96,28 +94,11 @@ def render_report(
         f"- unresolved statements: `{coverage.unresolved_statements}`",
         f"- unassigned blocks: `{coverage.unassigned_blocks}`",
         "",
-        "## AI Usage",
+        "## Semantic Overlay",
         "",
-        *(
-            ["- AI was disabled for this run."]
-            if not ai_usage or not ai_usage.get("enabled")
-            else []
-        ),
-        *(
-            [
-                f"- provider: `{ai_usage.get('provider', 'unknown')}`",
-                f"- model: `{ai_usage.get('model', 'unknown')}`",
-                f"- requests: `{ai_usage.get('requests', 0)}`",
-                f"- cache hits: `{ai_usage.get('cache_hits', 0)}`",
-                *[
-                    f"- warning: {warning}"
-                    for warning in ai_usage.get("warnings", [])
-                    if isinstance(warning, str)
-                ],
-            ]
-            if ai_usage and ai_usage.get("enabled")
-            else []
-        ),
+        "- Deterministic analysis does not call an AI provider.",
+        "- Optional agent annotations are stored separately under `agent/` and are not "
+        "part of this report.",
         "",
         "## Limitations",
         "",

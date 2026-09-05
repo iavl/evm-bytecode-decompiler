@@ -1,1 +1,1 @@
-"""Reserved for the later structured AI annotation pass."""
+"""Compatibility namespace for semantic annotation helpers."""

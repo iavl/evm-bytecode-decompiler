@@ -9,13 +9,11 @@ class EvidenceSource(StrEnum):
     RPC = "rpc"
     SIGNATURE_DB = "signature_db"
     HEURISTIC = "heuristic"
-    AI = "ai"
 
 
 class SemanticOrigin(StrEnum):
     DETERMINISTIC = "deterministic"
     HEURISTIC = "heuristic"
-    AI_INFERRED = "ai_inferred"
     EXTERNAL_SIGNATURE = "external_signature"
     USER_SUPPLIED = "user_supplied"
 

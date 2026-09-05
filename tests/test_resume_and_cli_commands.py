@@ -15,11 +15,11 @@ def test_resume_render_validate_and_explain_commands(tmp_path: Path) -> None:
         app,
         ["decompile", str(fixture), "--no-ai", "--resume", "-o", str(run_dir)],
     )
-    rendered = runner.invoke(app, ["render", str(run_dir), "--annotated"])
+    rendered = runner.invoke(app, ["render", str(run_dir)])
     validated = runner.invoke(app, ["validate", str(run_dir)])
     explained = runner.invoke(app, ["explain", str(run_dir), "--selector", "0xa9059cbb"])
 
     assert initial.exit_code == resumed.exit_code == rendered.exit_code == 0
     assert validated.exit_code == explained.exit_code == 0
     assert json.loads(validated.stdout)["functions"] == 1.0
-    assert json.loads(explained.stdout)["selector"] == "0xa9059cbb"
+    assert json.loads(explained.stdout)["function"]["selector"] == "0xa9059cbb"

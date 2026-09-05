@@ -34,17 +34,5 @@ class ValidationError(DecompilerError):
     """Generated deterministic output failed validation."""
 
 
-class AIProviderError(DecompilerError):
-    """An AI transport or provider response failed."""
-
-    def __init__(self, message: str, *, retryable: bool = False) -> None:
-        super().__init__(message)
-        self.retryable = retryable
-
-
-class AIResponseValidationError(AIProviderError):
-    """An AI response did not satisfy its requested structured schema."""
-
-
-class SynthesisValidationError(DecompilerError):
-    """Structured pseudocode did not preserve deterministic evidence."""
+class AnnotationError(DecompilerError):
+    """An agent semantic overlay is invalid or does not match its run."""

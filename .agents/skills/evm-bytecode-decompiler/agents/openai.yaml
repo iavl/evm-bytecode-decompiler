@@ -1,0 +1,7 @@
+interface:
+  display_name: "EVM Bytecode Decompiler"
+  short_description: "Evidence-grounded EVM bytecode analysis"
+  default_prompt: "Use $evm-bytecode-decompiler to analyze this EVM bytecode and explain the evidence-bound reconstruction."
+
+policy:
+  allow_implicit_invocation: true

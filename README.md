@@ -1,98 +1,94 @@
 # EVM Bytecode Decompiler
 
-AI-assisted semantic decompiler for EVM runtime bytecode, powered by a pinned
-Gigahorse toolchain.
+Deterministic EVM runtime analysis with optional evidence-grounded semantic
+reconstruction through a Codex Agent Skill. The Python package never calls a
+model service. Generated Solidity-like output is always **reconstructed,
+unverified pseudocode**, not recovered source code.
 
-The pipeline keeps deterministic bytecode facts separate from inferred names
-and semantics. Every generated Solidity-like file is **reconstructed,
-unverified pseudocode**, not recovered source code. AI can annotate names and
-explanations; it cannot add or rewrite deterministic operations.
+See [How It Works](docs/how-it-works.md) for the architecture and trust model.
 
 ## Quick start
 
 ```bash
 uv sync
 uv run evm-bytecode-decompiler version
-uv run evm-bytecode-decompiler decompile tests/fixtures/erc20/runtime.hex --no-ai
+uv run evm-bytecode-decompiler decompile tests/fixtures/erc20/runtime.hex \
+  --backend builtin
 ```
 
-The command prints the run directory. A typical run contains:
+The command prints a run directory. The built-in backend is a limited offline
+EVM lifter; it is a partial fallback, not full Gigahorse. The default
+`backend = "auto"` prefers a configured digest-pinned Docker or ready local
+Gigahorse runner and otherwise records that fallback explicitly.
 
-```text
-run/
-├── input/             # exact runtime and analysis bytecode
-├── gigahorse/         # invocation, results, and normalized facts
-├── ir/                # versioned canonical evidence IR
-├── semantics/         # optional AI annotations and validated candidates
-├── output/            # pseudocode, ABI, storage, evidence map, report
-├── logs/
-└── run.json
-```
+`--no-ai` remains accepted as a deprecated compatibility flag. It is no longer
+needed: normal CLI analysis is deterministic and does not inspect or require
+model credentials.
 
 ## Inputs
 
-Raw bytecode and `.hex` files are accepted directly:
+Raw runtime bytecode and `.hex` files are accepted directly:
 
 ```bash
-uv run evm-bytecode-decompiler decompile 0x6000 --no-ai
-uv run evm-bytecode-decompiler decompile ./contract.hex --no-ai
+uv run evm-bytecode-decompiler decompile 0x6000 --backend builtin
+uv run evm-bytecode-decompiler decompile ./contract.hex --backend builtin
 ```
 
-An address requires an RPC endpoint. Historical analysis passes the requested
-block tag to `eth_getCode` and never silently substitutes `latest`. The CLI
-accepts the address as `TARGET`:
+An address requires an RPC endpoint. A requested historical block is passed
+unchanged to `eth_getCode`; it is never silently replaced with `latest`:
 
 ```bash
 uv run evm-bytecode-decompiler decompile \
   0x1234567890123456789012345678901234567890 \
-  --chain ethereum --rpc-url "$ETH_RPC_URL" --block 20123456 --no-ai
+  --chain ethereum --rpc-url "$ETH_RPC_URL" --block 20123456
 ```
 
-## AI semantics
+## Codex Agent Skill
 
-AI is optional. Configure the OpenAI-compatible provider with environment
-variables or `evm-bytecode-decompiler.toml`:
+The repository-local Skill is at
+`.agents/skills/evm-bytecode-decompiler/`. Ask Codex explicitly when needed:
+
+> Use `evm-bytecode-decompiler` to analyze this bytecode and explain the
+> recovered evidence.
+
+The Skill runs deterministic analysis, reads bounded context, reasons about
+names/roles/storage labels/summaries, writes a strict proposal, and asks the
+CLI to validate and render it. It does not synthesize or replace function
+bodies. No `OPENAI_API_KEY`, `OPENAI_MODEL`, or external provider setup is
+required for this workflow.
+
+The same workflow is available manually:
 
 ```bash
-export OPENAI_API_KEY=...
-export OPENAI_MODEL=...
-uv run evm-bytecode-decompiler decompile ./contract.hex
+uv run evm-bytecode-decompiler context RUN_DIR
+uv run evm-bytecode-decompiler context RUN_DIR --selector 0xa9059cbb
+uv run evm-bytecode-decompiler agent validate RUN_DIR proposal.json
+uv run evm-bytecode-decompiler agent apply RUN_DIR proposal.json
+uv run evm-bytecode-decompiler agent render RUN_DIR
 ```
 
-Use `--no-ai` for deterministic-only output. AI annotations are optional
-proposals for names and explanations; the deterministic IR always owns the
-rendered operations. Provider failures fall back to deterministic pseudocode;
-they do not mutate canonical IR. Requests larger than the configured
-`max_prompt_bytes` limit are skipped without truncation.
-Cache keys include the canonical request, provider endpoint, model, generation
-settings, prompt hash, and response schema hash.
-
-Use `--backend builtin` for a deliberately limited offline lifter, or require
-`local`/`docker` when a full pinned toolchain is part of the run contract.
+Invalid function IDs, selectors, evidence references, storage references,
+confidence values, extra fields, or fingerprints are rejected. Applying an
+overlay does not modify canonical IR or deterministic output hashes.
 
 ## Gigahorse
 
-The repository pins Gigahorse at:
+The full toolchain is pinned through:
 
 ```text
-9e9c08d78079638342ca54101b347f1d6781b425
+vendor/gigahorse-toolchain @ 9e9c08d78079638342ca54101b347f1d6781b425
 ```
 
-Initialize the toolchain and its pinned recursive dependency with:
+Initialize the recursive submodules and inspect readiness with:
 
 ```bash
 git submodule update --init --recursive
 uv run evm-bytecode-decompiler doctor
 ```
 
-Local Gigahorse execution additionally needs Soufflé and the compiled native
-functors under `vendor/gigahorse-toolchain/souffle-addon/`. The default
-`backend = "auto"` selects a configured local or digest-pinned Docker runner
-and otherwise records a partial built-in lifter result. Set `backend =
-"local"`, `"docker"`, or `"builtin"` to require a specific backend.
-
-For a reproducible container, build `docker/gigahorse.Dockerfile` with an
-immutable `BASE_IMAGE` digest and the full Gigahorse commit:
+Local Gigahorse additionally needs Soufflé and the compiled native functors in
+`vendor/gigahorse-toolchain/souffle-addon/`. For a reproducible container, use
+an immutable base image digest:
 
 ```bash
 docker build \
@@ -101,31 +97,40 @@ docker build \
   -f docker/gigahorse.Dockerfile .
 ```
 
-The Docker runner rejects mutable image tags and disables network access for
-the analysis container. Runtime metadata is retained as a candidate trailer;
-the full runtime bytes are sent to the analysis backend.
+The Docker runner disables network access and rejects mutable image tags.
 
-## Inspecting a run
+## Run artifacts and inspection
+
+Each deterministic run separates canonical evidence from optional semantics:
+
+```text
+RUN_DIR/
+├── input/                 # normalized runtime bytes and input metadata
+├── gigahorse/             # invocation, results, and normalized relations
+├── ir/                    # canonical ContractIR
+├── output/                # deterministic ABI, storage, pseudocode, report
+├── logs/
+├── run.json               # deterministic fingerprint and artifact hashes
+└── agent/                 # optional validated semantic overlay
+    ├── proposal.json
+    ├── annotations.json
+    ├── manifest.json
+    ├── decompiled.annotated.sol
+    └── report.md
+```
+
+Useful commands:
 
 ```bash
 uv run evm-bytecode-decompiler explain RUN_DIR --selector 0xa9059cbb
-uv run evm-bytecode-decompiler render RUN_DIR --annotated
+uv run evm-bytecode-decompiler render RUN_DIR
 uv run evm-bytecode-decompiler validate RUN_DIR
-uv run evm-bytecode-decompiler decompile ./contract.hex --resume --no-ai
+uv run evm-bytecode-decompiler decompile ./contract.hex --resume
 ```
 
-Useful environment checks:
-
-```bash
-uv run evm-bytecode-decompiler doctor
-uv run evm-bytecode-decompiler cache stats
-uv run evm-bytecode-decompiler cache clear
-```
-
-Runs are published only after all structured artifacts pass validation. The
-manifest records the input, backend/toolchain identity, AI configuration
-fingerprint, and hashes for every artifact; `--resume` reuses a run only when
-that identity and every hash still match.
+`run.json` contains only deterministic identity and artifact hashes. Agent
+manifests bind their validated annotation hash to that fingerprint and are not
+added to the canonical artifact index.
 
 ## Benchmark
 
@@ -142,9 +147,9 @@ uv run evm-bytecode-decompiler benchmark run \
 uv run evm-bytecode-decompiler benchmark report --output-dir runs/benchmark
 ```
 
-Use a compiler matching each fixture pragma; `--strict` fails on compilation
-errors or deterministic fixture regressions against the expected facts in the
-manifest.
+Use a compiler matching each fixture pragma. `--strict` fails on compilation
+errors or deterministic regressions; a missing compiler version is reported as
+unavailable rather than as a decompiler result.
 
 ## Development
 
@@ -157,6 +162,6 @@ uv run mypy src
 uv build
 ```
 
-The project intentionally does not claim exact source recovery, exploit
-generation, transaction tracing, symbolic execution of every path, storage
-value fetching, vulnerability classification, or a web service.
+The project does not claim exact source recovery, exploit generation,
+transaction tracing, symbolic execution of every path, storage-value fetching,
+vulnerability classification, or a web service.

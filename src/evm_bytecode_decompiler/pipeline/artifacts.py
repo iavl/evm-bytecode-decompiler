@@ -3,7 +3,6 @@ import json
 import re
 from pathlib import Path
 
-from ..ai.schemas import PseudoFunction
 from ..inference.abi import InferredABI
 from ..inference.storage import StorageLayoutEntry
 from ..models.ir import ContractIR
@@ -26,7 +25,7 @@ def artifact_hash(path: Path) -> str:
 
 def validate_manifest(run_dir: Path, *, fingerprint: str | None = None) -> dict[str, object]:
     manifest = read_manifest(run_dir)
-    if manifest.get("schema_version") != 2:
+    if manifest.get("schema_version") != 3:
         raise ValueError("unsupported or missing run manifest version")
     if manifest.get("status") != "complete":
         raise ValueError(f"run is not complete: {manifest.get('status', 'unknown')}")
@@ -65,20 +64,3 @@ def load_abi(run_dir: Path) -> InferredABI:
 def load_storage(run_dir: Path) -> list[StorageLayoutEntry]:
     value = json.loads((run_dir / "output" / "storage.layout.json").read_text(encoding="utf-8"))
     return [StorageLayoutEntry.model_validate(item) for item in value.get("storage", [])]
-
-
-def load_synthesis(run_dir: Path) -> dict[str, PseudoFunction]:
-    try:
-        manifest = read_manifest(run_dir)
-    except (OSError, ValueError, json.JSONDecodeError):
-        return {}
-    ai = manifest.get("ai")
-    if not isinstance(ai, dict) or not ai.get("enabled"):
-        return {}
-    path = run_dir / "semantics" / "synthesis.json"
-    if not path.is_file():
-        return {}
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        return {}
-    return {key: PseudoFunction.model_validate(item) for key, item in value.items()}

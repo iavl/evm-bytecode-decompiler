@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "evm-bytecode-decompiler"
 version = "0.1.0"
-description = "AI-assisted semantic decompiler for EVM bytecode, powered by Gigahorse."
+description = "Deterministic EVM bytecode analysis with an evidence-grounded Agent Skill."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }

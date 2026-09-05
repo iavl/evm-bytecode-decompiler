@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 
-from evm_bytecode_decompiler.ai.schemas import PseudoFunction, PseudoStatement
 from evm_bytecode_decompiler.config import AppConfig, GigahorseConfig, OutputConfig
 from evm_bytecode_decompiler.errors import ArtifactError
 from evm_bytecode_decompiler.gigahorse.builtin import build_builtin_relations
@@ -12,10 +11,10 @@ from evm_bytecode_decompiler.inference.abi import infer_abi
 from evm_bytecode_decompiler.inference.storage import infer_storage_layout
 from evm_bytecode_decompiler.input.normalize import normalize_bytecode
 from evm_bytecode_decompiler.ir.builder import build_contract_ir
+from evm_bytecode_decompiler.models.annotations import FunctionAnnotation
 from evm_bytecode_decompiler.models.evidence import EvidenceSource
 from evm_bytecode_decompiler.pipeline.decompile import decompile
 from evm_bytecode_decompiler.synthesis.pseudocode import render_contract
-from evm_bytecode_decompiler.validation.hallucination import validate_pseudo_function
 
 
 def _contract(code: str):
@@ -26,41 +25,6 @@ def _contract(code: str):
         bytecode_size=len(value),
         evidence_source=EvidenceSource.BYTECODE,
     )
-
-
-def test_ai_validator_rejects_operation_mismatch_and_invented_calls() -> None:
-    function = _contract("602a60005500").functions[0]
-    mismatch = PseudoFunction(
-        function_id=function.id,
-        name="f",
-        body=[
-            PseudoStatement(
-                kind="return",
-                value="unknown",
-                evidence_refs=[function.storage_writes[0].id],
-            )
-        ],
-    )
-    invented = PseudoFunction(
-        function_id=function.id,
-        name="f",
-        body=[PseudoStatement(kind="call", call_type="call", target="attacker")],
-    )
-    misbound = PseudoFunction(
-        function_id=function.id,
-        name="f",
-        body=[
-            PseudoStatement(
-                kind="call",
-                call_type="call",
-                evidence_refs=[function.blocks[0].statements[0].id],
-            )
-        ],
-    )
-
-    assert validate_pseudo_function(function, mismatch).severity == "fail"
-    assert validate_pseudo_function(function, invented).severity == "fail"
-    assert validate_pseudo_function(function, misbound).severity == "fail"
 
 
 def test_builtin_stack_facts_handle_swap_and_truncated_push() -> None:
@@ -89,7 +53,6 @@ def test_pipeline_analyzes_full_runtime_even_with_metadata_candidate(tmp_path: P
         "0x" + runtime + "a10102" + "0003",
         output_dir=tmp_path / "run",
         config=config,
-        use_ai=False,
     )
     assert any(item.opcode == "SSTORE" for item in result.contract.statements)
     assert (tmp_path / "run" / "input" / "analysis.hex").read_text().strip() == (
@@ -102,25 +65,27 @@ def test_resume_requires_matching_input_identity(tmp_path: Path) -> None:
         gigahorse=GigahorseConfig(backend="builtin"),
         output=OutputConfig(root=tmp_path),
     )
-    decompile("0x6000", output_dir=tmp_path / "run", config=config, use_ai=False)
+    decompile("0x6000", output_dir=tmp_path / "run", config=config)
     with pytest.raises(ArtifactError):
         decompile("0x6000", output_dir=tmp_path / "run", config=config, block=1, resume=True)
 
 
-def test_renderer_ignores_ai_body_and_keeps_deterministic_operations() -> None:
+def test_annotations_can_rename_without_replacing_canonical_operations() -> None:
     contract = _contract("602a60005500")
-    pseudo = PseudoFunction(
-        function_id=contract.functions[0].id,
-        selector=None,
-        name="renamed",
-        body=[PseudoStatement(kind="return", value="0")],
+    function = contract.functions[0]
+    annotation = FunctionAnnotation(
+        proposed_name="renamed",
+        summary="writes one fixed storage slot",
+        storage_labels={function.storage_writes[0].id: "balance"},
+        evidence_refs=[function.storage_writes[0].id],
     )
     output = render_contract(
         contract,
         infer_abi(contract),
         infer_storage_layout(contract),
-        pseudo_functions={contract.functions[0].id: pseudo},
+        annotations={function.id: annotation},
+        annotated=True,
     )
     assert "function renamed" in output
-    assert "storage_0 =" in output
+    assert "balance =" in output
     assert "return 0;" not in output

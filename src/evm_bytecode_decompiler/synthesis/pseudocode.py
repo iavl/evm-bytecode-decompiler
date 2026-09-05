@@ -1,9 +1,9 @@
 import json
 from collections.abc import Iterable, Mapping
 
-from ..ai.schemas import PseudoFunction, PseudoStatement
 from ..inference.abi import InferredABI, InferredFunction
 from ..inference.storage import StorageLayoutEntry
+from ..models.annotations import ContractAnnotation, FunctionAnnotation
 from ..models.ir import (
     CallIR,
     ContractIR,
@@ -36,23 +36,37 @@ def expression_text(expression: ExpressionIR | None) -> str:
     return str(expression.value or expression.name or expression.kind)
 
 
-def _location_text(access: StorageAccessIR) -> str:
+def _label_for(access: StorageAccessIR, labels: Mapping[str, str] | None) -> str | None:
+    if not labels:
+        return None
+    return labels.get(access.id)
+
+
+def _location_text(access: StorageAccessIR | None, labels: Mapping[str, str] | None = None) -> str:
+    if access is None:
+        return "storage[unknown]"
+    label = _label_for(access, labels)
     location = access.location
     if isinstance(location, FixedSlot):
-        return f"storage_{location.slot}"
+        return label or f"storage_{location.slot}"
     if isinstance(location, MappingSlot):
-        return f"mapping_{location.base_slot}[{expression_text(location.key)}]"
+        name = label or f"mapping_{location.base_slot}"
+        return f"{name}[{expression_text(location.key)}]"
     if isinstance(location, NestedMappingSlot):
         keys = "][".join(expression_text(key) for key in location.keys)
-        return f"mapping_{location.base_slot}[{keys}]"
+        return f"{label or f'mapping_{location.base_slot}_nested'}[{keys}]"
     if isinstance(location, DynamicArraySlot):
-        return f"array_{location.base_slot}[{expression_text(location.index)}]"
+        return f"{label or f'array_{location.base_slot}'}[{expression_text(location.index)}]"
     if isinstance(location, SymbolicSlot):
-        return f"storage[{expression_text(location.expression)}]"
-    return "storage[unknown]"
+        return label or f"storage[{expression_text(location.expression)}]"
+    return label or "storage[unknown]"
 
 
-def _statement_text(statement: StatementIR, function: FunctionIR) -> str:
+def _statement_text(
+    statement: StatementIR,
+    function: FunctionIR,
+    storage_labels: Mapping[str, str] | None = None,
+) -> str:
     pc_text = f"{statement.pc:04x}" if statement.pc is not None else "unknown"
     variable = statement.defines[0] if statement.defines else f"v_{pc_text}"
     if statement.truncated:
@@ -67,14 +81,14 @@ def _statement_text(statement: StatementIR, function: FunctionIR) -> str:
             (item for item in function.storage_reads if item.statement_id == statement.id),
             None,
         )
-        return f"{variable} = {_location_text(access) if access else 'storage[unknown]'};"
+        return f"{variable} = {_location_text(access, storage_labels)};"
     if statement.opcode == "SSTORE":
         access = next(
             (item for item in function.storage_writes if item.statement_id == statement.id),
             None,
         )
         value = expression_text(access.value) if access and access.value else "<unknown>"
-        return f"{_location_text(access) if access else 'storage[unknown]'} = {value};"
+        return f"{_location_text(access, storage_labels)} = {value};"
     if statement.opcode in {
         "CALL",
         "STATICCALL",
@@ -136,71 +150,48 @@ def _function_info(abi: InferredABI, function: FunctionIR) -> InferredFunction |
     return next((item for item in abi.functions if item.function_id == function.id), None)
 
 
-def _pseudo_statement_lines(
-    statement: PseudoStatement, *, indent: str, annotated: bool
-) -> list[str]:
-    if statement.kind in {"if", "loop"}:
-        keyword = "if" if statement.kind == "if" else "while"
-        lines = [f"{indent}{keyword} ({statement.condition or '<unknown condition>'}) {{"]
-        for child in statement.body:
-            lines.extend(
-                _pseudo_statement_lines(child, indent=indent + "    ", annotated=annotated)
+def _function_name(
+    function: FunctionIR,
+    info: InferredFunction | None,
+    annotation: FunctionAnnotation | None,
+) -> str:
+    fallback = (
+        info.name if info else (f"func_{function.selector}" if function.selector else "fallback")
+    )
+    return safe_identifier(annotation.proposed_name, fallback) if annotation else fallback
+
+
+def _arguments(
+    function: FunctionIR,
+    info: InferredFunction | None,
+    annotation: FunctionAnnotation | None,
+) -> str:
+    names = info.arguments if info else [item.id for item in function.arguments]
+    values: list[str] = []
+    for index, default_name in enumerate(names):
+        value_id = function.arguments[index].id if index < len(function.arguments) else default_name
+        name = default_name
+        type_name = info.argument_types.get(default_name, "uint256") if info else "uint256"
+        if annotation:
+            name = annotation.argument_names.get(
+                value_id, annotation.argument_names.get(default_name, name)
             )
-        lines.append(f"{indent}}}")
-    elif statement.kind == "unknown":
-        lines = [f"{indent}// unresolved: {statement.unresolved or '<unknown construct>'}"]
-    elif statement.kind == "revert":
-        lines = [f"{indent}revert();"]
-    elif statement.kind == "return":
-        lines = [f"{indent}return {statement.value or '<unknown>'};"]
-    elif statement.kind == "event":
-        lines = [f"{indent}emit {statement.target or 'Log'}({statement.value or '<unknown>'});"]
-    elif statement.kind in {"call", "delegatecall", "staticcall", "selfdestruct"}:
-        if statement.kind == "selfdestruct":
-            lines = [f"{indent}selfdestruct({statement.value or '<unknown beneficiary>'});"]
-        else:
-            call_type = statement.call_type or statement.kind
-            lines = [
-                f"{indent}<unknown result> = {statement.target or '<unknown target>'}."
-                f"{call_type}({statement.value or '<unknown calldata>'});"
-            ]
-    elif statement.kind in {"create", "create2"}:
-        init_code = statement.value or "<unknown init code>"
-        lines = [f"{indent}<unknown address> = {statement.kind}({init_code});"]
-    elif statement.kind == "storage_write":
-        lines = [
-            f"{indent}{statement.target or 'storage[unknown]'} = {statement.value or '<unknown>'};"
-        ]
-    elif statement.kind == "storage_read":
-        lines = [
-            f"{indent}{statement.target or '<unknown value>'} = "
-            f"storage[{statement.value or '<unknown>'}];"
-        ]
-    else:
-        lines = [f"{indent}{statement.target or '<unknown>'} = {statement.value or '<unknown>'};"]
-    if annotated and statement.evidence_refs:
-        lines[-1] += f" // evidence: {', '.join(statement.evidence_refs)}"
-    return lines
+            type_name = annotation.argument_types.get(
+                value_id,
+                annotation.argument_types.get(default_name, type_name),
+            )
+        values.append(f"{type_name} {safe_identifier(name, f'arg{index}')}")
+    return ", ".join(values)
 
 
-def render_pseudo_function(pseudo: PseudoFunction, *, annotated: bool = False) -> list[str]:
-    name = safe_identifier(
-        pseudo.name,
-        f"func_{pseudo.selector}" if pseudo.selector else "fallback",
-    )
-    args = ", ".join(
-        f"{argument.type_name} {safe_identifier(argument.name, 'arg')}"
-        for argument in pseudo.arguments
-    )
-    lines = [f"    function {name}({args}) external {{"]
-    if not pseudo.body:
-        lines.append("        // no structured statements")
-    for statement in pseudo.body:
-        lines.extend(_pseudo_statement_lines(statement, indent="        ", annotated=annotated))
-    for unresolved in pseudo.unresolved:
-        lines.append(f"        // unresolved: {unresolved}")
-    lines.append("    }")
-    return lines
+def _labels(
+    annotation: FunctionAnnotation | None,
+    storage_labels: Mapping[str, str] | None,
+) -> dict[str, str]:
+    result = dict(storage_labels or {})
+    if annotation:
+        result.update(annotation.storage_labels)
+    return result
 
 
 def render_contract(
@@ -208,53 +199,66 @@ def render_contract(
     abi: InferredABI,
     storage: Iterable[StorageLayoutEntry],
     *,
-    pseudo_functions: Mapping[str, PseudoFunction] | None = None,
+    annotations: Mapping[str, FunctionAnnotation] | None = None,
+    contract_annotation: ContractAnnotation | None = None,
+    storage_labels: Mapping[str, str] | None = None,
     annotated: bool = False,
 ) -> str:
+    annotations = annotations or {}
+    labels = dict(storage_labels or {})
     lines = [
         "// EVM Bytecode Decompiler semantic decompilation",
         "// RECONSTRUCTED / UNVERIFIED: this is pseudocode, not verified source.",
         "",
         "contract DecompiledContract {",
     ]
-    for entry in storage:
+    if annotated and contract_annotation:
+        if contract_annotation.summary:
+            lines.append(f"    // semantic summary (advisory): {contract_annotation.summary}")
+        for role, value in contract_annotation.roles.items():
+            lines.append(f"    // inferred role (advisory): {role} = {value}")
+        for uncertainty in contract_annotation.uncertainties:
+            lines.append(f"    // uncertainty: {uncertainty}")
+        if (
+            contract_annotation.summary
+            or contract_annotation.roles
+            or contract_annotation.uncertainties
+        ):
+            lines.append("")
+    storage_items = list(storage)
+    for entry in storage_items:
+        name = safe_identifier(labels.get(entry.id, entry.name), entry.name)
         suffix = f" // {entry.origin}, confidence {entry.confidence:.2f}"
         type_name = "mapping(bytes32 => uint256)" if "mapping" in entry.kind else "uint256"
-        lines.append(f"    {type_name} internal {entry.name};{suffix}")
-    if storage:
+        lines.append(f"    {type_name} internal {name};{suffix}")
+    if storage_items:
         lines.append("")
     for function in contract.functions:
         info = _function_info(abi, function)
-        pseudo = pseudo_functions.get(function.id) if pseudo_functions else None
-        name = (
-            info.name
-            if info
-            else (f"func_{function.selector}" if function.selector else "fallback")
-        )
-        if pseudo:
-            name = safe_identifier(pseudo.name, name)
-        if pseudo and pseudo.arguments:
-            args = ", ".join(
-                f"uint256 {safe_identifier(argument.name, 'arg')}" for argument in pseudo.arguments
-            )
-        else:
-            args = ", ".join(f"uint256 {arg}" for arg in (info.arguments if info else []))
+        annotation = annotations.get(function.id) if annotated else None
+        function_labels = _labels(annotation, labels)
+        name = _function_name(function, info, annotation)
         lines.append(f"    // selector: {function.selector or '<fallback>'}")
         if info and info.candidates:
             for candidate in info.candidates:
                 lines.append(
                     f"    // signature candidate: {candidate.signature} ({candidate.source})"
                 )
-        # AI annotations may rename a function, but deterministic IR owns the
-        # body. This keeps AI from adding, dropping, or rewriting operations.
-        lines.append(f"    function {name}({args}) external {{")
+        if annotation and annotation.summary:
+            lines.append(f"    // semantic summary (advisory): {annotation.summary}")
+        if annotation:
+            for pattern in annotation.semantic_patterns:
+                lines.append(f"    // inferred pattern (advisory): {pattern}")
+            for uncertainty in annotation.uncertainties:
+                lines.append(f"    // uncertainty: {uncertainty}")
+        lines.append(f"    function {name}({_arguments(function, info, annotation)}) external {{")
         for block in function.blocks:
             lines.append(
                 f"        // basic block {block.id} @ pc "
                 f"{block.pc if block.pc is not None else '<unknown>'}"
             )
             for statement in block.statements:
-                rendered = _statement_text(statement, function)
+                rendered = _statement_text(statement, function, function_labels)
                 if annotated:
                     rendered += f" // evidence: {statement.id}"
                 lines.append(f"        {rendered}")
@@ -307,7 +311,7 @@ def render_contract(
                 evidence=block.evidence,
             )
             for statement in block.statements:
-                rendered = _statement_text(statement, view_function)
+                rendered = _statement_text(statement, view_function, labels)
                 if annotated:
                     rendered += f" // evidence: {statement.id}"
                 lines.append(f"        {rendered}")
@@ -326,8 +330,7 @@ def render_evidence_map(
     contract: ContractIR,
     abi: InferredABI,
     *,
-    annotations: Mapping[str, object] | None = None,
-    pseudo_functions: Mapping[str, PseudoFunction] | None = None,
+    annotations: Mapping[str, FunctionAnnotation] | None = None,
 ) -> str:
     functions: dict[str, object] = {}
     for function in contract.functions:
@@ -342,27 +345,11 @@ def render_evidence_map(
                 }
         item: dict[str, object] = {
             "selector": function.selector,
-            "name": (
-                safe_identifier(
-                    pseudo_functions[function.id].name,
-                    info.name if info else function.id,
-                )
-                if pseudo_functions and function.id in pseudo_functions
-                else info.name
-                if info
-                else function.id
-            ),
+            "name": info.name if info else function.id,
             "statements": statements,
         }
         if annotations and function.id in annotations:
-            annotation = annotations[function.id]
-            item["semantic_annotation"] = (
-                annotation.model_dump(mode="json")
-                if hasattr(annotation, "model_dump")
-                else annotation
-            )
-        if pseudo_functions and function.id in pseudo_functions:
-            item["structured_synthesis"] = pseudo_functions[function.id].model_dump(mode="json")
+            item["semantic_annotation"] = annotations[function.id].model_dump(mode="json")
         functions[function.id] = item
     unassigned: dict[str, object] = {}
     for block in contract.blocks:

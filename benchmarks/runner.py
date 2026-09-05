@@ -48,7 +48,6 @@ def run_benchmark(
                 "0x" + runtime.hex(),
                 output_dir=output_dir / name,
                 config=AppConfig(output=OutputConfig(root=output_dir)),
-                use_ai=False,
             )
             record["status"] = "ok"
             record["runtime_sha256"] = result.contract.bytecode_sha256

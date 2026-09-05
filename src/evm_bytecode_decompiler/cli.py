@@ -9,16 +9,12 @@ from benchmarks.compile import BenchmarkCompileError
 from benchmarks.runner import report_benchmark, run_benchmark
 
 from . import __version__
-from .cache.store import CacheStore
+from .agent.artifacts import render_agent
+from .agent.context import build_context
+from .agent.validation import apply_proposal, validate_proposal
 from .config import load_config
 from .errors import DecompilerError
-from .pipeline.artifacts import (
-    load_abi,
-    load_contract,
-    load_storage,
-    load_synthesis,
-    validate_manifest,
-)
+from .pipeline.artifacts import load_abi, load_contract, load_storage, validate_manifest
 from .pipeline.decompile import decompile as run_decompile
 from .synthesis.pseudocode import render_contract
 from .validation.coverage import compute_coverage
@@ -36,19 +32,27 @@ def version() -> None:
 @app.command("decompile")
 def decompile_command(
     target: str = typer.Argument(..., metavar="TARGET"),
-    no_ai: bool = typer.Option(False, "--no-ai", help="Run deterministic phases only."),
+    no_ai: bool = typer.Option(
+        False,
+        "--no-ai",
+        help="Deprecated compatibility flag; deterministic analysis never calls an AI provider.",
+    ),
     rpc_url: str | None = typer.Option(None, "--rpc-url"),
     chain: str | None = typer.Option(None, "--chain"),
     block: str | None = typer.Option(None, "--block", help="Explicit block number or block tag."),
     output_dir: Path | None = typer.Option(None, "--output-dir", "-o"),
-    resume: bool = typer.Option(
-        False, "--resume", help="Reuse valid saved deterministic and AI artifacts."
-    ),
+    resume: bool = typer.Option(False, "--resume", help="Reuse a valid deterministic run."),
     backend: str | None = typer.Option(
         None, "--backend", help="Require auto, local, docker, or builtin analysis."
     ),
 ) -> None:
-    """Decompile raw bytecode, a .hex file, or an address."""
+    """Decompile raw bytecode, a .hex file, or an address deterministically."""
+    if no_ai:
+        typer.echo(
+            "--no-ai is deprecated; the core CLI is deterministic and does not call "
+            "an AI provider.",
+            err=True,
+        )
     try:
         result = run_decompile(
             target,
@@ -56,7 +60,6 @@ def decompile_command(
             rpc_url=rpc_url,
             chain=chain,
             block=block,
-            use_ai=not no_ai,
             resume=resume,
             backend=backend,
         )
@@ -76,7 +79,7 @@ def analyze_command(
 ) -> None:
     """Run the deterministic analysis checkpoint."""
     try:
-        result = run_decompile(target, output_dir=output_dir, use_ai=False, backend=backend)
+        result = run_decompile(target, output_dir=output_dir, backend=backend)
     except (DecompilerError, ValueError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -112,19 +115,34 @@ def doctor() -> None:
 
 
 @app.command()
+def context(
+    run_dir: Path = typer.Argument(..., exists=True, file_okay=False),
+    selector: str | None = typer.Option(None, "--selector"),
+) -> None:
+    """Print bounded contract or function-level canonical evidence as JSON."""
+    try:
+        typer.echo(json.dumps(build_context(run_dir, selector), indent=2))
+    except (DecompilerError, OSError, ValueError, json.JSONDecodeError) as exc:
+        typer.echo(f"error: invalid run or context: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command()
 def explain(
     run_dir: Path = typer.Argument(..., exists=True, file_okay=False),
     selector: str = typer.Option(..., "--selector"),
 ) -> None:
-    """Show one function's canonical evidence and inferred facts."""
+    """Show one function's bounded canonical evidence and inferred facts."""
     try:
-        validate_manifest(run_dir)
-        contract = load_contract(run_dir)
-        function = next(item for item in contract.functions if item.selector == selector.lower())
-    except (DecompilerError, StopIteration, OSError, ValueError, json.JSONDecodeError) as exc:
+        payload = build_context(run_dir, selector)
+        function = payload.get("function")
+        if isinstance(function, dict):
+            payload.setdefault("id", function.get("id"))
+            payload.setdefault("selector", function.get("selector"))
+        typer.echo(json.dumps(payload, indent=2))
+    except (DecompilerError, OSError, ValueError, json.JSONDecodeError) as exc:
         typer.echo(f"error: selector not found or invalid run: {exc}", err=True)
         raise typer.Exit(1) from exc
-    typer.echo(json.dumps(function.model_dump(mode="json"), indent=2))
 
 
 @app.command()
@@ -132,22 +150,17 @@ def render(
     run_dir: Path = typer.Argument(..., exists=True, file_okay=False),
     annotated: bool = typer.Option(False, "--annotated"),
 ) -> None:
-    """Re-render a saved run without rerunning analysis or AI."""
+    """Re-render canonical output, or an already-applied agent overlay."""
     try:
         validate_manifest(run_dir)
-        contract = load_contract(run_dir)
-        abi = load_abi(run_dir)
-        storage = load_storage(run_dir)
-        synthesis = load_synthesis(run_dir)
-        output = render_contract(
-            contract,
-            abi,
-            storage,
-            pseudo_functions=synthesis or None,
-            annotated=annotated,
-        )
-        path = run_dir / "output" / ("decompiled.annotated.sol" if annotated else "decompiled.sol")
-        path.write_text(output, encoding="utf-8")
+        if annotated:
+            path, _ = render_agent(run_dir)
+        else:
+            contract = load_contract(run_dir)
+            abi = load_abi(run_dir)
+            storage = load_storage(run_dir)
+            path = run_dir / "output" / "decompiled.sol"
+            path.write_text(render_contract(contract, abi, storage), encoding="utf-8")
     except (DecompilerError, OSError, ValueError, json.JSONDecodeError) as exc:
         typer.echo(f"error: invalid run: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -156,7 +169,7 @@ def render(
 
 @app.command()
 def validate(run_dir: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
-    """Validate saved structured synthesis coverage against canonical IR."""
+    """Validate the saved deterministic IR and report its coverage."""
     try:
         validate_manifest(run_dir)
         contract = load_contract(run_dir)
@@ -172,21 +185,48 @@ def validate(run_dir: Path = typer.Argument(..., exists=True, file_okay=False)) 
     typer.echo(json.dumps(coverage.model_dump(mode="json"), indent=2))
 
 
-cache_app = typer.Typer(add_completion=False)
-app.add_typer(cache_app, name="cache")
+agent_app = typer.Typer(add_completion=False, no_args_is_help=True)
+app.add_typer(agent_app, name="agent")
 
 
-@cache_app.command("stats")
-def cache_stats() -> None:
-    """Show the local AI cache size."""
-    typer.echo(json.dumps(CacheStore(load_config().ai.cache_dir).stats(), indent=2))
+@agent_app.command("validate")
+def agent_validate(
+    run_dir: Path = typer.Argument(..., exists=True, file_okay=False),
+    proposal: Path = typer.Argument(..., exists=True, dir_okay=False),
+) -> None:
+    """Validate an agent annotation proposal without writing it."""
+    try:
+        validated = validate_proposal(run_dir, proposal)
+    except (DecompilerError, OSError, ValueError, json.JSONDecodeError) as exc:
+        typer.echo(f"error: invalid annotation proposal: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps(validated.model_dump(mode="json"), indent=2))
 
 
-@cache_app.command("clear")
-def cache_clear() -> None:
-    """Clear local AI cache entries."""
-    removed = CacheStore(load_config().ai.cache_dir).clear()
-    typer.echo(f"removed {removed} cache entries")
+@agent_app.command("apply")
+def agent_apply(
+    run_dir: Path = typer.Argument(..., exists=True, file_okay=False),
+    proposal: Path = typer.Argument(..., exists=True, dir_okay=False),
+) -> None:
+    """Validate and persist an agent annotation overlay."""
+    try:
+        apply_proposal(run_dir, proposal)
+    except (DecompilerError, OSError, ValueError, json.JSONDecodeError) as exc:
+        typer.echo(f"error: invalid annotation proposal: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(run_dir / "agent" / "annotations.json")
+
+
+@agent_app.command("render")
+def agent_render(run_dir: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
+    """Render an applied semantic overlay and its report."""
+    try:
+        output, report = render_agent(run_dir)
+    except (DecompilerError, OSError, ValueError, json.JSONDecodeError) as exc:
+        typer.echo(f"error: invalid agent overlay: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(output)
+    typer.echo(report)
 
 
 benchmark_app = typer.Typer(add_completion=False)

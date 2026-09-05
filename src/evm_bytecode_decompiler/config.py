@@ -40,27 +40,8 @@ class OutputConfig:
 
 
 @dataclass(frozen=True)
-class AIConfig:
-    provider: str = "openai-compatible"
-    model: str = ""
-    endpoint: str = "https://api.openai.com/v1/chat/completions"
-    temperature: float = 0.0
-    max_concurrency: int = 4
-    timeout_seconds: int = 60
-    max_prompt_bytes: int = 128 * 1024
-    cache_dir: Path = Path.home() / ".cache" / "evm-bytecode-decompiler" / "ai"
-
-    def __post_init__(self) -> None:
-        if self.max_concurrency < 1 or self.timeout_seconds < 1 or self.max_prompt_bytes < 1:
-            raise ValueError("AI concurrency, timeout, and prompt limit must be positive")
-        if not 0.0 <= self.temperature <= 2.0:
-            raise ValueError("AI temperature must be between 0 and 2")
-
-
-@dataclass(frozen=True)
 class AppConfig:
     gigahorse: GigahorseConfig = field(default_factory=GigahorseConfig)
-    ai: AIConfig = field(default_factory=AIConfig)
     rpc: dict[str, str] = field(default_factory=dict)
     output: OutputConfig = field(default_factory=OutputConfig)
 
@@ -72,7 +53,6 @@ def load_config(path: Path | None = None) -> AppConfig:
     with config_path.open("rb") as handle:
         raw = _expand(tomllib.load(handle))
     gh = raw.get("gigahorse", {})
-    ai = raw.get("ai", {})
     output = raw.get("output", {})
     return AppConfig(
         gigahorse=GigahorseConfig(
@@ -86,21 +66,6 @@ def load_config(path: Path | None = None) -> AppConfig:
             commit=gh.get("commit", ""),
             image=gh.get("image", ""),
             toolchain_dir=Path(gh.get("toolchain_dir", "vendor/gigahorse-toolchain")).expanduser(),
-        ),
-        ai=AIConfig(
-            provider=ai.get("provider", "openai-compatible"),
-            model=ai.get("model", ""),
-            endpoint=ai.get("endpoint", "https://api.openai.com/v1/chat/completions"),
-            temperature=float(ai.get("temperature", 0.0)),
-            max_concurrency=int(ai.get("max_concurrency", 4)),
-            timeout_seconds=int(ai.get("timeout_seconds", 60)),
-            max_prompt_bytes=int(ai.get("max_prompt_bytes", 128 * 1024)),
-            cache_dir=Path(
-                ai.get(
-                    "cache_dir",
-                    str(Path.home() / ".cache" / "evm-bytecode-decompiler" / "ai"),
-                )
-            ).expanduser(),
         ),
         rpc={str(key): str(value) for key, value in raw.get("rpc", {}).items() if value},
         output=OutputConfig(

@@ -1,5 +1,6 @@
 """Versioned input and canonical IR models."""
 
+from .annotations import AnnotationProposal, ContractAnnotation, FunctionAnnotation
 from .evidence import EvidenceRef, EvidenceSource, NamedSemantic, SemanticOrigin
 from .input import InputKind, InputMetadata, MetadataTrailer, NormalizedBytecode
 from .ir import (
@@ -22,8 +23,10 @@ from .ir import (
 )
 
 __all__ = [
+    "AnnotationProposal",
     "BasicBlockIR",
     "CallIR",
+    "ContractAnnotation",
     "ContractIR",
     "DynamicArraySlot",
     "EventIR",
@@ -32,6 +35,7 @@ __all__ = [
     "NamedSemantic",
     "ExpressionIR",
     "FixedSlot",
+    "FunctionAnnotation",
     "FunctionIR",
     "InputKind",
     "InputMetadata",

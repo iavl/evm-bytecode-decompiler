@@ -62,8 +62,8 @@ def render_benchmark_report(results: Iterable[dict[str, Any]]) -> str:
     lines.extend(
         [
             "",
-            "Metrics are deterministic structural observations; readability and AI semantics "
-            "are not folded into these scores.",
+            "Metrics are deterministic structural observations; semantic labels are not folded "
+            "into these scores.",
             "",
         ]
     )
