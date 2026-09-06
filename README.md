@@ -25,6 +25,56 @@ Gigahorse runner and otherwise records that fallback explicitly.
 needed: normal CLI analysis is deterministic and does not inspect or require
 model credentials.
 
+## Install the Agent Skill
+
+The repository-local Skill is already available at
+`.agents/skills/evm-bytecode-decompiler/`. To install independent copies for
+both Codex and Claude Code:
+
+```bash
+./install.sh
+```
+
+The default destinations are:
+
+```text
+${CODEX_HOME:-$HOME/.codex}/skills/evm-bytecode-decompiler
+${CLAUDE_HOME:-$HOME/.claude}/skills/evm-bytecode-decompiler
+```
+
+Install only one target when needed:
+
+```bash
+./install.sh --target codex
+./install.sh --target claude
+```
+
+The installer copies the Skill files but does not install Python dependencies,
+Gigahorse, or a global CLI. Keep this checkout available and use `uv run` for
+the deterministic CLI. When a globally installed wrapper is invoked outside
+the checkout, set the repository explicitly:
+
+```bash
+EVM_BYTECODE_DECOMPILER_REPO=/path/to/evm-bytecode-decompiler \
+  ~/.codex/skills/evm-bytecode-decompiler/scripts/preflight.sh
+```
+
+The installer refuses to overwrite any existing destination, including a
+symbolic link. To update an installation, remove the exact target directory
+after checking it and run the installer again. Use `CODEX_HOME` and
+`CLAUDE_HOME` to select non-default home directories:
+
+```bash
+CODEX_HOME=/custom/codex CLAUDE_HOME=/custom/claude ./install.sh
+```
+
+Verify an installation with:
+
+```bash
+test -f "$HOME/.codex/skills/evm-bytecode-decompiler/SKILL.md"
+test -f "$HOME/.claude/skills/evm-bytecode-decompiler/SKILL.md"
+```
+
 ## Inputs
 
 Raw runtime bytecode and `.hex` files are accepted directly:
@@ -43,19 +93,21 @@ uv run evm-bytecode-decompiler decompile \
   --chain ethereum --rpc-url "$ETH_RPC_URL" --block 20123456
 ```
 
-## Codex Agent Skill
+## Codex and Claude Code Agent Skill
 
 The repository-local Skill is at
-`.agents/skills/evm-bytecode-decompiler/`. Ask Codex explicitly when needed:
+`.agents/skills/evm-bytecode-decompiler/`. Ask Codex or Claude Code explicitly
+when needed:
 
 > Use `evm-bytecode-decompiler` to analyze this bytecode and explain the
 > recovered evidence.
 
-The Skill runs deterministic analysis, reads bounded context, reasons about
-names/roles/storage labels/summaries, writes a strict proposal, and asks the
-CLI to validate and render it. It does not synthesize or replace function
-bodies. No `OPENAI_API_KEY`, `OPENAI_MODEL`, or external provider setup is
-required for this workflow.
+The same Skill can be invoked by Claude Code after installation. It runs the
+deterministic CLI, reads bounded context, reasons about names/roles/storage
+labels/summaries, writes a strict proposal, and asks the CLI to validate and
+render it. It does not synthesize or replace function bodies. No
+`OPENAI_API_KEY`, `OPENAI_MODEL`, or external provider setup is required for
+this workflow.
 
 The same workflow is available manually:
 
